@@ -1,0 +1,10 @@
+[package]
+name = "cropped"
+description = "Place a camera-ready PDF sheet into an A4 page"
+version = "0.1.0"
+license = "MIT"
+authors = [ "Andrew Cowie" ]
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.53", features = ["wrap_help"] }
