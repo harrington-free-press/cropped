@@ -32,22 +32,23 @@ pub fn combine(
         .ok_or(lopdf::Error::ObjectNotFound((0, 0)))?;
     let template_page = template_document.get_object(template_page_id)?.as_dict()?;
 
-    // Decode template content operations (drawing commands for crop marks)
-    // These are decoded once and reused for all pages
+    // Decode template content operations (the drawing commands for the crop
+    // marks).
     let template_ops = if let Ok(content_ref) = template_page.get(b"Contents") {
         get_content_operations(&template_document, content_ref)?
     } else {
         Vec::new()
     };
 
-    // Copy template resources once into manuscript document
-    // This translates object references from template document to manuscript document.
-    // The resulting Dictionary contains References valid in the manuscript, pointing
-    // to shared objects (fonts, graphics, etc.) that will be reused across all pages.
+    // They are, however, resources in the template document and not in the
+    // new one. Translate object references from one to the other. The
+    // resulting Dictionary contains References valid in the output
+    // manuscript, pointing to shared objects (fonts, graphics, etc.) that
+    // will be reused across all pages.
     let template_resources = get_resources_dict(&template_document, template_page)?;
     let mut cache: HashMap<ObjectId, ObjectId> = HashMap::new();
 
-    // copy the resources to become references into the the new document (the
+    // Copy the resources to become references into the the new document (the
     // one based on the manuscript)
     let template_resources = copy_resources(&template_document, &template_resources, &mut manuscript_document, &mut cache)?;
 
@@ -87,10 +88,10 @@ fn stamp_page(
     template_ops: &[Operation],
     template_resources: &Dictionary,
 ) -> lopdf::Result<()> {
-    let page = doc.get_object(page_id)?.as_dict()?.clone();
+    // Clone the page dictionary once so we can mutate doc
+    let mut new_page = doc.get_object(page_id)?.as_dict()?.clone();
 
     // Change MediaBox from 6"×9" (432×648) to A4 (595×842)
-    let mut new_page = page.clone();
     new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
 
     // Create wrapper stream: template + transformation start
@@ -122,7 +123,7 @@ fn stamp_page(
     // This is harmless - viewers simply concatenate streams in order.
     let mut contents_array = vec![Object::Reference(start_id)];
 
-    if let Ok(original_contents) = page.get(b"Contents") {
+    if let Ok(original_contents) = new_page.get(b"Contents") {
         match original_contents {
             Object::Reference(_) => {
                 // Single stream (typical case for Typst PDFs) - add as-is
@@ -142,11 +143,11 @@ fn stamp_page(
     new_page.set("Contents", Object::Array(contents_array));
 
     // Merge resources - combine page's existing resources with template resources
-    // Even though template resources are identical for all pages, each manuscript page
-    // has different resources (fonts, images, etc.), so we must merge per-page.
-    // The template_resources Dictionary contains References to shared objects, so
-    // cloning it is cheap - we're just copying References, not the actual content.
-    let page_resources = get_resources_dict(doc, &page)?;
+    // Each manuscript page has different resources (fonts, images, etc.), so we must
+    // merge per-page. Note that cloning dictionaries copies the HashMap structure,
+    // byte vector keys, and nested dictionaries, though the actual PDF objects
+    // (fonts, images) are referenced, not duplicated.
+    let page_resources = get_resources_dict(doc, &new_page)?;
     let merged_resources = merge_resources(&page_resources, template_resources);
     let resources_ref = doc.add_object(Object::Dictionary(merged_resources));
     new_page.set("Resources", resources_ref);
