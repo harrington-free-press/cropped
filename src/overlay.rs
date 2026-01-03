@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::collections::HashMap;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
@@ -25,6 +26,10 @@ pub fn combine(
         .next()
         .ok_or(lopdf::Error::ObjectNotFound((0, 0)))?;
 
+    // Object cache to avoid duplicating resources across pages
+    let mut template_cache: HashMap<ObjectId, ObjectId> = HashMap::new();
+    let mut manuscript_cache: HashMap<ObjectId, ObjectId> = HashMap::new();
+
     // For each manuscript page, create a new combined page
     let mut new_page_ids = Vec::new();
 
@@ -35,6 +40,8 @@ pub fn combine(
             template_page_id,
             manuscript_page_id,
             &mut output,
+            &mut template_cache,
+            &mut manuscript_cache,
         )?;
         new_page_ids.push(new_page_id);
     }
@@ -100,6 +107,8 @@ fn combine_page(
     template_page_id: ObjectId,
     manuscript_page_id: ObjectId,
     output: &mut Document,
+    template_cache: &mut HashMap<ObjectId, ObjectId>,
+    manuscript_cache: &mut HashMap<ObjectId, ObjectId>,
 ) -> lopdf::Result<ObjectId> {
     // Get template page dictionary
     let template_page = template.get_object(template_page_id)?.as_dict()?;
@@ -117,15 +126,15 @@ fn combine_page(
     let template_resources = get_resources_dict(template, template_page)?;
     let mut resources = Dictionary::new();
 
-    // Copy template resources to output, dereferencing all objects
+    // Copy template resources to output, dereferencing all objects with caching
     for (key, value) in template_resources.iter() {
-        let new_value = copy_object_deep(template, value, output)?;
+        let new_value = copy_object_deep(template, value, output, template_cache)?;
         resources.set(key.clone(), new_value);
     }
 
     // Create a Form XObject from the manuscript page
     let xobject_name = b"ManuscriptPage".to_vec();
-    let form_xobject_id = create_form_xobject(manuscript, manuscript_page_id, output)?;
+    let form_xobject_id = create_form_xobject(manuscript, manuscript_page_id, output, manuscript_cache)?;
 
     // Add the Form XObject to resources
     let mut xobjects = if let Ok(xobj_dict) = resources.get(b"XObject") {
@@ -189,6 +198,7 @@ fn create_form_xobject(
     manuscript: &Document,
     page_id: ObjectId,
     output: &mut Document,
+    cache: &mut HashMap<ObjectId, ObjectId>,
 ) -> lopdf::Result<ObjectId> {
     let page = manuscript.get_object(page_id)?.as_dict()?;
 
@@ -201,7 +211,7 @@ fn create_form_xobject(
 
     // Get page resources and copy them to output
     let resources = get_resources_dict(manuscript, page)?;
-    let resources_id = copy_resources_deep(manuscript, &resources, output)?;
+    let resources_id = copy_resources_deep(manuscript, &resources, output, cache)?;
 
     // Get MediaBox for BBox
     let bbox = if let Ok(media_box) = page.get(b"MediaBox") {
@@ -275,11 +285,12 @@ fn copy_resources_deep(
     source: &Document,
     resources: &Dictionary,
     output: &mut Document,
+    cache: &mut HashMap<ObjectId, ObjectId>,
 ) -> lopdf::Result<ObjectId> {
     let mut new_resources = Dictionary::new();
 
     for (key, value) in resources.iter() {
-        let new_value = copy_object_deep(source, value, output)?;
+        let new_value = copy_object_deep(source, value, output, cache)?;
         new_resources.set(key.clone(), new_value);
     }
 
@@ -292,9 +303,15 @@ fn copy_object_deep(
     source: &Document,
     obj: &Object,
     output: &mut Document,
+    cache: &mut HashMap<ObjectId, ObjectId>,
 ) -> lopdf::Result<Object> {
     match obj {
         Object::Reference(id) => {
+            // Check cache first to avoid duplicating objects
+            if let Some(&cached_id) = cache.get(id) {
+                return Ok(Object::Reference(cached_id));
+            }
+
             // Dereference and copy the actual object
             let referenced_obj = source.get_object(*id)?;
             match referenced_obj {
@@ -305,22 +322,24 @@ fn copy_object_deep(
                 Object::Dictionary(dict) => {
                     let mut new_dict = Dictionary::new();
                     for (k, v) in dict.iter() {
-                        let new_v = copy_object_deep(source, v, output)?;
+                        let new_v = copy_object_deep(source, v, output, cache)?;
                         new_dict.set(k.clone(), new_v);
                     }
-                    let new_id = output.add_object(Object::Dictionary(new_dict));
-                    Ok(Object::Reference(new_id))
+                    output.add_object(Object::Dictionary(new_dict))
                 }
                 _ => {
-                    let new_id = output.add_object(referenced_obj.clone());
-                    Ok(Object::Reference(new_id))
+                    output.add_object(referenced_obj.clone())
                 }
-            }
+            };
+
+            // Cache the mapping
+            cache.insert(*id, new_id);
+            Ok(Object::Reference(new_id))
         }
         Object::Dictionary(dict) => {
             let mut new_dict = Dictionary::new();
             for (k, v) in dict.iter() {
-                let new_v = copy_object_deep(source, v, output)?;
+                let new_v = copy_object_deep(source, v, output, cache)?;
                 new_dict.set(k.clone(), new_v);
             }
             Ok(Object::Dictionary(new_dict))
@@ -328,7 +347,7 @@ fn copy_object_deep(
         Object::Array(arr) => {
             let mut new_arr = Vec::new();
             for item in arr {
-                let new_item = copy_object_deep(source, item, output)?;
+                let new_item = copy_object_deep(source, item, output, cache)?;
                 new_arr.push(new_item);
             }
             Ok(Object::Array(new_arr))
