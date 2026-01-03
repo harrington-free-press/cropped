@@ -162,6 +162,10 @@ fn combine_page(
     // The manuscript page is 6"×9" = 432×648 points
     // A4 is 595×842 points
     // Center it: (595-432)/2 = 81.5, (842-648)/2 = 97
+    //
+    // Typst generates PDFs with a Y-axis flip transformation (top-left origin).
+    // To counter this, we apply a Y-flip when placing the Form XObject:
+    // [1, 0, 0, -1, x, y] where y = bottom_margin + height due to the flip
 
     operations.push(Operation::new("q", vec![])); // Save graphics state
     operations.push(Operation::new(
@@ -170,9 +174,9 @@ fn combine_page(
             1.into(),
             0.into(),
             0.into(),
-            1.into(),
-            81.5.into(),
-            97.into(),
+            (-1).into(),        // Flip Y-axis to counter Typst's internal flip
+            81.5.into(),        // Horizontal centering
+            (97.0 + 648.0).into(), // Vertical position: bottom_margin + height
         ],
     ));
     operations.push(Operation::new("Do", vec![Object::Name(xobject_name)]));
