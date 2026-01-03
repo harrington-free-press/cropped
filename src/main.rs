@@ -7,7 +7,6 @@ use tracing_subscriber;
 mod overlay;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-const TEMPLATE: &str = "CropMarks_A4.pdf";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,13 +39,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(ArgAction::Version),
         )
         .arg(
-            Arg::new("template")
-                .short('t')
-                .long("template")
-                .value_name("TEMPLATE")
-                .help(format!("Path to the template PDF with crop marks. The default is {} in the present working directory.", TEMPLATE)),
-        )
-        .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
@@ -69,20 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Extract command-line arguments
     //
 
-    let default = PathBuf::from(TEMPLATE);
-    let template_path = match matches.get_one::<PathBuf>("template") {
-        Some(path) => path,
-        None => &default,
-    };
-
-    if !template_path.exists() {
-        eprintln!(
-            "{}: Template PDF not found.",
-            "error".bright_red()
-        );
-        std::process::exit(1);
-    }
-
     let output_path = matches.get_one::<PathBuf>("output").unwrap();
 
     let manuscript_path = matches.get_one::<PathBuf>("manuscript").unwrap();
@@ -95,12 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    debug!(?template_path);
     debug!(?output_path);
     debug!(?manuscript_path);
 
     // Combine the PDFs
-    overlay::combine(template_path, output_path, manuscript_path)?;
+    overlay::combine(output_path, manuscript_path)?;
 
     info!("PDF combination completed successfully");
 

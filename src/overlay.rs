@@ -18,7 +18,6 @@ use tracing::info;
 /// never decoded or modified, minimizing risk of corruption. Crop marks are
 /// generated programmatically via native PDF drawing operations.
 pub fn combine(
-    _template_path: &Path,
     output_path: &Path,
     manuscript_path: &Path,
 ) -> lopdf::Result<()> {
