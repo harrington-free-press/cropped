@@ -12,44 +12,46 @@ pub fn combine(
     output_path: &Path,
     manuscript_path: &Path,
 ) -> lopdf::Result<()> {
-    let template = Document::load(template_path)?;
-    let mut manuscript = Document::load(manuscript_path)?;
+    let template_document = Document::load(template_path)?;
+    let mut manuscript_document = Document::load(manuscript_path)?;
 
     info!("Files loaded");
 
-    // Get the template page (crop marks)
-    let template_page_id = template
+    // Get the template page (crop marks) - single page document
+    let template_page_id = template_document
         .page_iter()
         .next()
         .ok_or(lopdf::Error::ObjectNotFound((0, 0)))?;
-    let template_page = template.get_object(template_page_id)?.as_dict()?;
+    let template_page = template_document.get_object(template_page_id)?.as_dict()?;
 
     // Get template content operations
     let template_ops = if let Ok(content_ref) = template_page.get(b"Contents") {
-        get_content_operations(&template, content_ref)?
+        get_content_operations(&template_document, content_ref)?
     } else {
         Vec::new()
     };
 
-    // Copy template resources once
-    let template_resources = get_resources_dict(&template, template_page)?;
+    let template_resources = get_resources_dict(&template_document, template_page)?;
     let mut cache: HashMap<ObjectId, ObjectId> = HashMap::new();
-    let template_resources_copy = copy_resources(&template, &template_resources, &mut manuscript, &mut cache)?;
+
+    // copy the resources to become references into the the new document (the
+    // one based on the manuscript)
+    let template_resources = copy_resources(&template_document, &template_resources, &mut manuscript_document, &mut cache)?;
 
     // Process each manuscript page
-    let page_ids: Vec<ObjectId> = manuscript.page_iter().collect();
+    let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
     for page_id in page_ids {
         stamp_page(
-            &mut manuscript,
+            &mut manuscript_document,
             page_id,
             &template_ops,
-            &template_resources_copy,
+            &template_resources,
         )?;
     }
 
-    manuscript.compress();
+    manuscript_document.compress();
     info!("Save output");
-    manuscript.save(output_path)?;
+    manuscript_document.save(output_path)?;
 
     Ok(())
 }
@@ -66,24 +68,11 @@ fn stamp_page(
     let mut new_page = page.clone();
     new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
 
-    // Get existing page content
-    let page_ops = if let Ok(content_ref) = page.get(b"Contents") {
-        get_content_operations(doc, content_ref)?
-    } else {
-        Vec::new()
-    };
-
-    // Build new content: template first (underneath), then manuscript content centered
-    let mut ops = Vec::new();
-
-    // Draw template (crop marks)
-    ops.extend(template_ops.iter().cloned());
-
-    // Center manuscript content with coordinate transformation
-    // Typst uses a flipped Y coordinate system, so we need to flip and position
-    // Transform: flip Y axis and translate to center
-    ops.push(Operation::new("q", vec![]));
-    ops.push(Operation::new("cm", vec![
+    // Create wrapper stream: template + transformation start
+    let mut start_ops = Vec::new();
+    start_ops.extend(template_ops.iter().cloned());
+    start_ops.push(Operation::new("q", vec![]));
+    start_ops.push(Operation::new("cm", vec![
         1.into(),
         0.into(),
         0.into(),
@@ -91,15 +80,38 @@ fn stamp_page(
         81.5.into(),        // Horizontal centering: (595-432)/2
         (97.0 + 648.0).into(), // Vertical: bottom_margin + height
     ]));
-    ops.extend(page_ops);
-    ops.push(Operation::new("Q", vec![]));
 
-    // Create new content stream
-    let content = Content { operations: ops };
-    let content_data = content.encode()?;
-    let content_stream = Stream::new(dictionary! {}, content_data);
-    let new_content_id = doc.add_object(content_stream);
-    new_page.set("Contents", new_content_id);
+    let start_content = Content { operations: start_ops };
+    let start_stream = Stream::new(dictionary! {}, start_content.encode()?);
+    let start_id = doc.add_object(start_stream);
+
+    // Create wrapper stream: transformation end
+    let end_ops = vec![Operation::new("Q", vec![])];
+    let end_content = Content { operations: end_ops };
+    let end_stream = Stream::new(dictionary! {}, end_content.encode()?);
+    let end_id = doc.add_object(end_stream);
+
+    // Build Contents array preserving original content objects
+    let mut contents_array = vec![Object::Reference(start_id)];
+
+    if let Ok(original_contents) = page.get(b"Contents") {
+        match original_contents {
+            Object::Reference(_) => {
+                // Single stream - add as-is
+                contents_array.push(original_contents.clone());
+            }
+            Object::Array(arr) => {
+                // Already an array - preserve all elements
+                contents_array.extend(arr.iter().cloned());
+            }
+            _ => {
+                // Unexpected type, but handle gracefully
+            }
+        }
+    }
+
+    contents_array.push(Object::Reference(end_id));
+    new_page.set("Contents", Object::Array(contents_array));
 
     // Merge resources - create a new merged dictionary and add as new object
     let page_resources = get_resources_dict(doc, &page)?;
