@@ -48,6 +48,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .required(true),
         )
         .arg(
+            Arg::new("size")
+                .short('s')
+                .long("size")
+                .value_name("SIZE")
+                .help("Trim size of the input manuscript.")
+                .default_value("trade"),
+        )
+        .arg(
             Arg::new("manuscript")
                 .value_name("INPUT")
                 .value_parser(value_parser!(PathBuf))
@@ -65,6 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let manuscript_path = matches.get_one::<PathBuf>("manuscript").unwrap();
 
+    let trim_size = matches.get_one::<String>("size").unwrap();
+
     if !manuscript_path.exists() {
         eprintln!(
             "{}: Input manuscript PDF not found.",
@@ -73,11 +83,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    // Parse paper size to dimensions (width, height in points)
+    let (trim_width, trim_height) = match trim_size.as_str() {
+        "trade" => (432.0, 648.0), // 6" × 9"
+        _ => {
+            eprintln!(
+                "{}: Unknown paper size '{}'. Supported: trade",
+                "error".bright_red(),
+                trim_size
+            );
+            std::process::exit(1);
+        }
+    };
+
     debug!(?output_path);
     debug!(?manuscript_path);
+    debug!(?trim_size);
 
     // Combine the PDFs
-    overlay::combine(output_path, manuscript_path)?;
+    overlay::combine(output_path, manuscript_path, trim_width, trim_height)?;
 
     info!("PDF combination completed successfully");
 

@@ -9,17 +9,22 @@ use tracing::info;
 /// Uses a "stamping" approach: the manuscript document is the primary file,
 /// preserving its structure, metadata, and page tree. For each manuscript
 /// page we:
-/// 
-/// - Expand the MediaBox from 6"×9" to A4
+///
+/// - Expand the MediaBox to A4
 /// - Wrap the original content in a transformation to center it
-/// - Draw crop marks at the corners of the content area
+/// - Draw crop marks at the trim size corners
 ///
 /// The original manuscript's content streams (i.e. individual pages) are
 /// never decoded or modified, minimizing risk of corruption. Crop marks are
 /// generated programmatically via native PDF drawing operations.
+///
+/// The trim size (e.g., 6"×9") defines where crop marks are placed. The actual
+/// content may be larger (with bleed) and will be centered accordingly.
 pub fn combine(
     output_path: &Path,
     manuscript_path: &Path,
+    trim_width: f64,
+    trim_height: f64,
 ) -> lopdf::Result<()> {
     let mut manuscript_document = Document::load(manuscript_path)?;
 
@@ -28,11 +33,11 @@ pub fn combine(
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
     for page_id in page_ids {
-        stamp_page(&mut manuscript_document, page_id)?;
+        stamp_page(&mut manuscript_document, page_id, trim_width, trim_height)?;
     }
 
     manuscript_document.compress();
-    
+
     info!("Save output");
     manuscript_document.save(output_path)?;
 
@@ -121,33 +126,68 @@ fn generate_crop_marks(
 /// re-encode the stream's operations.
 ///
 /// This creates a Contents array:
-/// 
+///
 /// [start_wrapper, original_content, end_wrapper]
-/// 
+///
 /// where:
-/// 
+///
 /// - start_wrapper: crop marks + transformation start (q, cm)
 /// - original_content: preserved as-is (Reference or Array)
 /// - end_wrapper: transformation end (Q)
 ///
 /// This approach ensures original streams are never modified, minimizing the
 /// risk of corrupting the input document's content.
-fn stamp_page(doc: &mut Document, page_id: ObjectId) -> lopdf::Result<()> {
+///
+/// The trim size defines where crop marks are placed. The actual content (which
+/// may include bleed) is read from the original MediaBox and centered accordingly.
+fn stamp_page(
+    doc: &mut Document,
+    page_id: ObjectId,
+    trim_width: f64,
+    trim_height: f64,
+) -> lopdf::Result<()> {
     // Clone the page dictionary once so we can mutate doc
-    let mut new_page = doc.get_object(page_id)?.as_dict()?.clone();
+    let page = doc.get_object(page_id)?.as_dict()?.clone();
 
-    // Change MediaBox from 6"×9" (432×648) to A4 (595×842)
+    // Read original MediaBox to get actual content dimensions
+    let original_mediabox = page.get(b"MediaBox")?;
+    let (actual_width, actual_height) = match original_mediabox {
+        Object::Array(arr) if arr.len() == 4 => {
+            // MediaBox format: [x1, y1, x2, y2]
+            // Convert to f64 handling both Integer and Real types
+            let to_f64 = |obj: &Object| -> lopdf::Result<f64> {
+                match obj {
+                    Object::Integer(i) => Ok(*i as f64),
+                    Object::Real(r) => Ok(*r as f64),
+                    _ => Err(lopdf::Error::PageNumberNotFound(0)),
+                }
+            };
+            let x1 = to_f64(&arr[0])?;
+            let y1 = to_f64(&arr[1])?;
+            let x2 = to_f64(&arr[2])?;
+            let y2 = to_f64(&arr[3])?;
+            (x2 - x1, y2 - y1)
+        }
+        _ => return Err(lopdf::Error::PageNumberNotFound(0)),
+    };
+
+    let mut new_page = page;
+
+    // Change MediaBox to A4 (595×842)
     new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
 
-    // Content dimensions and positioning on A4
-    let content_width = 432.0;
-    let content_height = 648.0;
-    let content_x = (595.0 - content_width) / 2.0;  // 81.5
-    let content_y = (842.0 - content_height) / 2.0; // 97.0
+    // Center actual content on A4
+    let content_x: f64 = (595.0 - actual_width) / 2.0;
+    let content_y: f64 = (842.0 - actual_height) / 2.0;
+
+    // Calculate trim area position (centered on A4)
+    let trim_x: f64 = (595.0 - trim_width) / 2.0;
+    let trim_y: f64 = (842.0 - trim_height) / 2.0;
 
     // Create wrapper stream: crop marks + transformation start
     let mut start_ops = Vec::new();
-    start_ops.extend(generate_crop_marks(content_x, content_y, content_width, content_height));
+    // Draw crop marks at trim size position
+    start_ops.extend(generate_crop_marks(trim_x, trim_y, trim_width, trim_height));
     start_ops.push(Operation::new("q", vec![]));
     start_ops.push(Operation::new("cm", vec![
         1.into(),
