@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('t')
                 .long("template")
                 .value_name("TEMPLATE")
-                .help("Path to the template PDF with crop marks."),
+                .help(format!("Path to the template PDF with crop marks. The default is {} in the present working directory.", TEMPLATE)),
         )
         .arg(
             Arg::new("output")
