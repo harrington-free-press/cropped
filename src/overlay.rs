@@ -6,7 +6,15 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 use tracing::info;
 
 /// Combines a manuscript PDF with a crop marks template.
-/// The template crop marks are stamped onto each manuscript page.
+///
+/// Uses a "stamping" approach where the manuscript document is the primary file,
+/// preserving its structure, metadata, and page tree. For each manuscript page:
+/// - Expands MediaBox from 6"×9" to A4
+/// - Wraps original content in transformation to center it
+/// - Prepends template crop marks (drawn underneath)
+///
+/// Original manuscript content streams are never decoded or modified, minimizing
+/// risk of corruption. Template resources are copied once and shared across all pages.
 pub fn combine(
     template_path: &Path,
     output_path: &Path,
@@ -24,13 +32,18 @@ pub fn combine(
         .ok_or(lopdf::Error::ObjectNotFound((0, 0)))?;
     let template_page = template_document.get_object(template_page_id)?.as_dict()?;
 
-    // Get template content operations
+    // Decode template content operations (drawing commands for crop marks)
+    // These are decoded once and reused for all pages
     let template_ops = if let Ok(content_ref) = template_page.get(b"Contents") {
         get_content_operations(&template_document, content_ref)?
     } else {
         Vec::new()
     };
 
+    // Copy template resources once into manuscript document
+    // This translates object references from template document to manuscript document.
+    // The resulting Dictionary contains References valid in the manuscript, pointing
+    // to shared objects (fonts, graphics, etc.) that will be reused across all pages.
     let template_resources = get_resources_dict(&template_document, template_page)?;
     let mut cache: HashMap<ObjectId, ObjectId> = HashMap::new();
 
@@ -56,6 +69,18 @@ pub fn combine(
     Ok(())
 }
 
+/// Stamps the template onto a single manuscript page.
+///
+/// Preserves the original page content by wrapping it in transformation operations
+/// rather than decoding and re-encoding. Creates a Contents array:
+/// [start_wrapper, original_content, end_wrapper] where:
+/// - start_wrapper: template crop marks + transformation start (q, cm)
+/// - original_content: preserved as-is (Reference or Array)
+/// - end_wrapper: transformation end (Q)
+///
+/// This approach ensures original content streams are never modified, minimizing
+/// corruption risk. The template_resources Dictionary is passed by reference as
+/// it contains References to shared objects already copied into this document.
 fn stamp_page(
     doc: &mut Document,
     page_id: ObjectId,
@@ -92,12 +117,15 @@ fn stamp_page(
     let end_id = doc.add_object(end_stream);
 
     // Build Contents array preserving original content objects
+    // Per PDF spec, Contents can be a single stream Reference or an Array of References.
+    // We convert to Array format to sandwich the original content between our wrappers.
+    // This is harmless - viewers simply concatenate streams in order.
     let mut contents_array = vec![Object::Reference(start_id)];
 
     if let Ok(original_contents) = page.get(b"Contents") {
         match original_contents {
             Object::Reference(_) => {
-                // Single stream - add as-is
+                // Single stream (typical case for Typst PDFs) - add as-is
                 contents_array.push(original_contents.clone());
             }
             Object::Array(arr) => {
@@ -105,7 +133,7 @@ fn stamp_page(
                 contents_array.extend(arr.iter().cloned());
             }
             _ => {
-                // Unexpected type, but handle gracefully
+                // Unexpected type, but handle gracefully (blank page)
             }
         }
     }
@@ -113,7 +141,11 @@ fn stamp_page(
     contents_array.push(Object::Reference(end_id));
     new_page.set("Contents", Object::Array(contents_array));
 
-    // Merge resources - create a new merged dictionary and add as new object
+    // Merge resources - combine page's existing resources with template resources
+    // Even though template resources are identical for all pages, each manuscript page
+    // has different resources (fonts, images, etc.), so we must merge per-page.
+    // The template_resources Dictionary contains References to shared objects, so
+    // cloning it is cheap - we're just copying References, not the actual content.
     let page_resources = get_resources_dict(doc, &page)?;
     let merged_resources = merge_resources(&page_resources, template_resources);
     let resources_ref = doc.add_object(Object::Dictionary(merged_resources));
@@ -125,6 +157,17 @@ fn stamp_page(
     Ok(())
 }
 
+/// Copies resources from source document to destination document.
+///
+/// The resources Dictionary typically contains References to objects in the source
+/// document (e.g., Font: Reference(789)). These References are meaningless in the
+/// destination document. This function:
+/// 1. Dereferences objects in the source document
+/// 2. Deep copies them to the destination document (getting new IDs)
+/// 3. Returns a Dictionary with References pointing to the newly copied objects
+///
+/// The cache prevents duplicating shared objects - if multiple resources reference
+/// the same font or color space, it's only copied once.
 fn copy_resources(
     source: &Document,
     resources: &Dictionary,
@@ -141,6 +184,14 @@ fn copy_resources(
     Ok(new_resources)
 }
 
+/// Merges two resource dictionaries, preferring base values in case of conflicts.
+///
+/// Resources are structured as dictionaries of dictionaries, e.g.:
+/// { "Font": { "F1": Reference(123), "F2": Reference(456) } }
+///
+/// When merging, we combine the subdictionaries, adding overlay entries only if
+/// they don't conflict with base entries. This preserves the manuscript's resources
+/// while adding template resources.
 fn merge_resources(base: &Dictionary, overlay: &Dictionary) -> Dictionary {
     let mut merged = base.clone();
 
@@ -225,6 +276,15 @@ fn get_content_operations(doc: &Document, content_ref: &Object) -> lopdf::Result
     }
 }
 
+/// Recursively copies an object from source document to output document.
+///
+/// Handles all PDF object types, following References to copy the actual objects.
+/// The cache ensures shared objects (like color spaces referenced by multiple images)
+/// are only copied once - subsequent references return a Reference to the cached copy.
+///
+/// This is critical for:
+/// - Avoiding duplicate objects in output (keeping file size reasonable)
+/// - Preserving object relationships (multiple references to same object stay that way)
 fn copy_object_deep(
     source: &Document,
     obj: &Object,
