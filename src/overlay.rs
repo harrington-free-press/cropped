@@ -16,7 +16,7 @@ pub fn combine(
     let mut output = Document::with_version("1.7");
 
     // The template with the crop marks is a single page. We get the first
-    // page of the template.
+    // page of that file.
     let template_page_id = template
         .page_iter()
         .next()

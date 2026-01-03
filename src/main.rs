@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 use tracing_subscriber;
 
+mod overlay;
+
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 const TEMPLATE: &str = "CropMarks_A4.pdf";
 
@@ -67,21 +69,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
 
     let default = PathBuf::from(TEMPLATE);
-    let template = match matches.get_one::<PathBuf>("template") {
+    let template_path = match matches.get_one::<PathBuf>("template") {
         Some(path) => path,
         None => &default,
     };
 
-    let output = matches.get_one::<PathBuf>("output").unwrap();
+    let output_path = matches.get_one::<PathBuf>("output").unwrap();
 
-    let manuscript = matches.get_one::<PathBuf>("manuscript").unwrap();
+    let manuscript_path = matches.get_one::<PathBuf>("manuscript").unwrap();
 
-    debug!(?template);
-    debug!(?output);
-    debug!(?manuscript);
+    debug!(?template_path);
+    debug!(?output_path);
+    debug!(?manuscript_path);
 
     // Combine the PDFs
-    overlay::combine(template, output, manuscript)?;
+    overlay::combine(template_path, output_path, manuscript_path)?;
 
     info!("PDF combination completed successfully");
 
