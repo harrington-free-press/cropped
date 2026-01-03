@@ -7,7 +7,6 @@ use tracing_subscriber;
 mod overlay;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
-const TEMPLATE: &str = "CropMarks_A4.pdf";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,13 +39,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .action(ArgAction::Version),
         )
         .arg(
-            Arg::new("template")
-                .short('t')
-                .long("template")
-                .value_name("TEMPLATE")
-                .help(format!("Path to the template PDF with crop marks. The default is {} in the present working directory.", TEMPLATE)),
-        )
-        .arg(
             Arg::new("output")
                 .short('o')
                 .long("output")
@@ -54,6 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .value_parser(value_parser!(PathBuf))
                 .help("Path for the output PDF.")
                 .required(true),
+        )
+        .arg(
+            Arg::new("size")
+                .short('s')
+                .long("size")
+                .value_name("SIZE")
+                .help("Trim size of the input manuscript.")
+                .default_value("trade"),
         )
         .arg(
             Arg::new("manuscript")
@@ -69,23 +69,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Extract command-line arguments
     //
 
-    let default = PathBuf::from(TEMPLATE);
-    let template_path = match matches.get_one::<PathBuf>("template") {
-        Some(path) => path,
-        None => &default,
-    };
-
-    if !template_path.exists() {
-        eprintln!(
-            "{}: Template PDF not found.",
-            "error".bright_red()
-        );
-        std::process::exit(1);
-    }
-
     let output_path = matches.get_one::<PathBuf>("output").unwrap();
 
     let manuscript_path = matches.get_one::<PathBuf>("manuscript").unwrap();
+
+    let trim_size = matches.get_one::<String>("size").unwrap();
 
     if !manuscript_path.exists() {
         eprintln!(
@@ -95,12 +83,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    debug!(?template_path);
+    // Parse paper size to dimensions (width, height in points)
+    let (trim_width, trim_height) = match trim_size.as_str() {
+        "trade" => (432.0, 648.0), // 6" × 9"
+        _ => {
+            eprintln!(
+                "{}: Unknown paper size '{}'. Supported: trade",
+                "error".bright_red(),
+                trim_size
+            );
+            std::process::exit(1);
+        }
+    };
+
     debug!(?output_path);
     debug!(?manuscript_path);
+    debug!(?trim_size);
 
     // Combine the PDFs
-    overlay::combine(template_path, output_path, manuscript_path)?;
+    overlay::combine(output_path, manuscript_path, trim_width, trim_height)?;
 
     info!("PDF combination completed successfully");
 

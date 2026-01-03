@@ -1,370 +1,240 @@
 use std::path::Path;
-use std::collections::HashMap;
 
 use lopdf::content::{Content, Operation};
-use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
+use lopdf::{Document, Object, ObjectId, Stream, dictionary};
 use tracing::info;
 
-/// Combines a manuscript PDF with a crop marks template.
-/// Each page of the manuscript is stamped onto a template page.
+/// Add crop marks to a manuscript PDF by expanding pages to A4 and drawing lines.
+///
+/// Uses a "stamping" approach: the manuscript document is the primary file,
+/// preserving its structure, metadata, and page tree. For each manuscript
+/// page we:
+///
+/// - Expand the MediaBox to A4
+/// - Wrap the original content in a transformation to center it
+/// - Draw crop marks at the trim size corners
+///
+/// The original manuscript's content streams (i.e. individual pages) are
+/// never decoded or modified, minimizing risk of corruption. Crop marks are
+/// generated programmatically via native PDF drawing operations.
+///
+/// The trim size (e.g., 6"×9") defines where crop marks are placed. The actual
+/// content may be larger (with bleed) and will be centered accordingly.
 pub fn combine(
-    template_path: &Path,
     output_path: &Path,
     manuscript_path: &Path,
+    trim_width: f64,
+    trim_height: f64,
 ) -> lopdf::Result<()> {
-    let template = Document::load(template_path)?;
-    let manuscript = Document::load(manuscript_path)?;
+    let mut manuscript_document = Document::load(manuscript_path)?;
 
-    info!("Files loaded");
+    info!("Manuscript loaded");
 
-    let mut output = Document::with_version("1.7");
-
-    // The template with the crop marks is a single page. We get the first
-    // page of that file.
-    let template_page_id = template
-        .page_iter()
-        .next()
-        .ok_or(lopdf::Error::ObjectNotFound((0, 0)))?;
-
-    // Object cache to avoid duplicating resources across pages
-    let mut template_cache: HashMap<ObjectId, ObjectId> = HashMap::new();
-    let mut manuscript_cache: HashMap<ObjectId, ObjectId> = HashMap::new();
-
-    // For each manuscript page, create a new combined page
-    let mut new_page_ids = Vec::new();
-
-    for manuscript_page_id in manuscript.page_iter() {
-        let new_page_id = combine_page(
-            &template,
-            &manuscript,
-            template_page_id,
-            manuscript_page_id,
-            &mut output,
-            &mut template_cache,
-            &mut manuscript_cache,
-        )?;
-        new_page_ids.push(new_page_id);
+    // Process each manuscript page
+    let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
+    for page_id in page_ids {
+        stamp_page(&mut manuscript_document, page_id, trim_width, trim_height)?;
     }
 
-    // Create new Pages root object
-    let pages_id = output.new_object_id();
-
-    // Update all pages to have correct Parent reference
-    for page_id in &new_page_ids {
-        if let Ok(Object::Dictionary(mut page_dict)) =
-            output.get_object_mut(*page_id).map(|o| o.clone())
-        {
-            page_dict.set("Parent", pages_id);
-            output
-                .objects
-                .insert(*page_id, Object::Dictionary(page_dict));
-        }
-    }
-
-    let pages = dictionary! {
-        "Type" => "Pages",
-        "Kids" => new_page_ids.iter().map(|id| Object::Reference(*id)).collect::<Vec<_>>(),
-        "Count" => new_page_ids.len() as u32,
-    };
-
-    output.objects.insert(pages_id, Object::Dictionary(pages));
-
-    // Create Catalog
-    let catalog_id = output.new_object_id();
-
-    let catalog = dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-    };
-
-    output
-        .objects
-        .insert(catalog_id, Object::Dictionary(catalog));
-    output.trailer.set("Root", catalog_id);
-
-    // Copy Info dictionary from manuscript if it exists
-    if let Ok(info_ref) = manuscript.trailer.get(b"Info") {
-        if let Object::Reference(info_id) = info_ref {
-            if let Ok(info_obj) = manuscript.get_object(*info_id) {
-                let new_info_id = output.add_object(info_obj.clone());
-                output.trailer.set("Info", new_info_id);
-            }
-        }
-    }
-
-    output.compress();
+    manuscript_document.compress();
 
     info!("Save output");
-
-    output.save(output_path)?;
+    manuscript_document.save(output_path)?;
 
     Ok(())
 }
 
-fn combine_page(
-    template: &Document,
-    manuscript: &Document,
-    template_page_id: ObjectId,
-    manuscript_page_id: ObjectId,
-    output: &mut Document,
-    template_cache: &mut HashMap<ObjectId, ObjectId>,
-    manuscript_cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<ObjectId> {
-    // Get template page dictionary
-    let template_page = template.get_object(template_page_id)?.as_dict()?;
+/// Generate PDF operations to draw crop marks at the corners of the given
+/// content area.
+///
+/// * `content_x` - Left edge of content area
+/// * `content_y` - Bottom edge of content area
+/// * `content_width` - Width of content area
+/// * `content_height` - Height of content area
+///
+fn generate_crop_marks(
+    content_x: f64,
+    content_y: f64,
+    content_width: f64,
+    content_height: f64,
+) -> Vec<Operation> {
+    let mut ops = Vec::new();
 
-    // Start with template page as base
-    let mut new_page_dict = Dictionary::new();
-    new_page_dict.set("Type", "Page");
+    // Set crop line width (0.5 pt is reasonably standard)
+    ops.push(Operation::new("w", vec![0.5.into()]));
 
-    // Copy MediaBox from template (A4 size)
-    if let Ok(media_box) = template_page.get(b"MediaBox") {
-        new_page_dict.set("MediaBox", media_box.clone());
-    }
+    // Set stroke color to black (in gray scale)
+    ops.push(Operation::new("G", vec![0.into()]));
 
-    // Get template resources and copy them deeply to output document
-    let template_resources = get_resources_dict(template, template_page)?;
-    let mut resources = Dictionary::new();
+    // Crop mark length extending outside content area
+    let mark_length = 20.0;
+    let mark_offset = 5.0; // Gap between content edge and crop mark
 
-    // Copy template resources to output, dereferencing all objects with caching
-    for (key, value) in template_resources.iter() {
-        let new_value = copy_object_deep(template, value, output, template_cache)?;
-        resources.set(key.clone(), new_value);
-    }
+    // Calculate corner positions
+    let left = content_x;
+    let right = content_x + content_width;
+    let bottom = content_y;
+    let top = content_y + content_height;
 
-    // Create a Form XObject from the manuscript page
-    let xobject_name = b"ManuscriptPage".to_vec();
-    let form_xobject_id = create_form_xobject(manuscript, manuscript_page_id, output, manuscript_cache)?;
+    // Bottom-left corner (horizontal and vertical marks)
+    // Horizontal mark (left side)
+    ops.push(Operation::new("m", vec![(left - mark_offset - mark_length).into(), bottom.into()]));
+    ops.push(Operation::new("l", vec![(left - mark_offset).into(), bottom.into()]));
+    ops.push(Operation::new("S", vec![]));
+    // Vertical mark (bottom side)
+    ops.push(Operation::new("m", vec![left.into(), (bottom - mark_offset - mark_length).into()]));
+    ops.push(Operation::new("l", vec![left.into(), (bottom - mark_offset).into()]));
+    ops.push(Operation::new("S", vec![]));
 
-    // Add the Form XObject to resources
-    let mut xobjects = if let Ok(xobj_dict) = resources.get(b"XObject") {
-        if let Object::Dictionary(dict) = xobj_dict {
-            dict.clone()
-        } else {
-            Dictionary::new()
-        }
-    } else {
-        Dictionary::new()
-    };
+    // Bottom-right corner
+    // Horizontal mark (right side)
+    ops.push(Operation::new("m", vec![(right + mark_offset).into(), bottom.into()]));
+    ops.push(Operation::new("l", vec![(right + mark_offset + mark_length).into(), bottom.into()]));
+    ops.push(Operation::new("S", vec![]));
+    // Vertical mark (bottom side)
+    ops.push(Operation::new("m", vec![right.into(), (bottom - mark_offset - mark_length).into()]));
+    ops.push(Operation::new("l", vec![right.into(), (bottom - mark_offset).into()]));
+    ops.push(Operation::new("S", vec![]));
 
-    xobjects.set(xobject_name.clone(), Object::Reference(form_xobject_id));
-    resources.set("XObject", Object::Dictionary(xobjects));
+    // Top-left corner
+    // Horizontal mark (left side)
+    ops.push(Operation::new("m", vec![(left - mark_offset - mark_length).into(), top.into()]));
+    ops.push(Operation::new("l", vec![(left - mark_offset).into(), top.into()]));
+    ops.push(Operation::new("S", vec![]));
+    // Vertical mark (top side)
+    ops.push(Operation::new("m", vec![left.into(), (top + mark_offset).into()]));
+    ops.push(Operation::new("l", vec![left.into(), (top + mark_offset + mark_length).into()]));
+    ops.push(Operation::new("S", vec![]));
 
-    // Build combined content stream
-    let mut operations = Vec::new();
+    // Top-right corner
+    // Horizontal mark (right side)
+    ops.push(Operation::new("m", vec![(right + mark_offset).into(), top.into()]));
+    ops.push(Operation::new("l", vec![(right + mark_offset + mark_length).into(), top.into()]));
+    ops.push(Operation::new("S", vec![]));
+    // Vertical mark (top side)
+    ops.push(Operation::new("m", vec![right.into(), (top + mark_offset).into()]));
+    ops.push(Operation::new("l", vec![right.into(), (top + mark_offset + mark_length).into()]));
+    ops.push(Operation::new("S", vec![]));
 
-    // First, draw template content (crop marks)
-    if let Ok(content_ref) = template_page.get(b"Contents") {
-        operations.extend(get_content_operations(template, content_ref)?);
-    }
-
-    // Then, stamp the manuscript page on top
-    // The manuscript page is 6"×9" = 432×648 points
-    // A4 is 595×842 points
-    // Center it: (595-432)/2 = 81.5, (842-648)/2 = 97
-    //
-    // Typst generates PDFs with a Y-axis flip transformation (top-left origin).
-    // To counter this, we apply a Y-flip when placing the Form XObject:
-    // [1, 0, 0, -1, x, y] where y = bottom_margin + height due to the flip
-
-    operations.push(Operation::new("q", vec![])); // Save graphics state
-    operations.push(Operation::new(
-        "cm",
-        vec![
-            1.into(),
-            0.into(),
-            0.into(),
-            (-1).into(),        // Flip Y-axis to counter Typst's internal flip
-            81.5.into(),        // Horizontal centering
-            (97.0 + 648.0).into(), // Vertical position: bottom_margin + height
-        ],
-    ));
-    operations.push(Operation::new("Do", vec![Object::Name(xobject_name)]));
-    operations.push(Operation::new("Q", vec![])); // Restore graphics state
-
-    // Create new content stream
-    let content = Content { operations };
-    let content_id = output.add_object(Stream::new(dictionary! {}, content.encode()?));
-
-    // Add resources to output
-    let resources_id = output.add_object(Object::Dictionary(resources));
-
-    // Build new page
-    new_page_dict.set("Contents", content_id);
-    new_page_dict.set("Resources", resources_id);
-
-    let page_id = output.add_object(Object::Dictionary(new_page_dict));
-
-    Ok(page_id)
+    ops
 }
 
-fn create_form_xobject(
-    manuscript: &Document,
+/// Adds crop marks to a single manuscript page.
+///
+/// Preserves the original page content by wrapping it in transformation
+/// operations avoiding the necessity we would otherwise have to decode and
+/// re-encode the stream's operations.
+///
+/// This creates a Contents array:
+///
+/// [start_wrapper, original_content, end_wrapper]
+///
+/// where:
+///
+/// - start_wrapper: crop marks + transformation start (q, cm)
+/// - original_content: preserved as-is (Reference or Array)
+/// - end_wrapper: transformation end (Q)
+///
+/// This approach ensures original streams are never modified, minimizing the
+/// risk of corrupting the input document's content.
+///
+/// The trim size defines where crop marks are placed. The actual content (which
+/// may include bleed) is read from the original MediaBox and centered accordingly.
+fn stamp_page(
+    doc: &mut Document,
     page_id: ObjectId,
-    output: &mut Document,
-    cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<ObjectId> {
-    let page = manuscript.get_object(page_id)?.as_dict()?;
+    trim_width: f64,
+    trim_height: f64,
+) -> lopdf::Result<()> {
+    // Clone the page dictionary once so we can mutate doc
+    let page = doc.get_object(page_id)?.as_dict()?.clone();
 
-    // Get page content
-    let content_ops = if let Ok(content_ref) = page.get(b"Contents") {
-        get_content_operations(manuscript, content_ref)?
-    } else {
-        Vec::new()
-    };
-
-    // Get page resources and copy them to output
-    let resources = get_resources_dict(manuscript, page)?;
-    let resources_id = copy_resources_deep(manuscript, &resources, output, cache)?;
-
-    // Get MediaBox for BBox
-    let bbox = if let Ok(media_box) = page.get(b"MediaBox") {
-        media_box.clone()
-    } else {
-        // Default to 6"×9" in points (432×648)
-        vec![0.into(), 0.into(), 432.into(), 648.into()].into()
-    };
-
-    // Create Form XObject
-    let content = Content {
-        operations: content_ops,
-    };
-    let form_dict = dictionary! {
-        "Type" => "XObject",
-        "Subtype" => "Form",
-        "BBox" => bbox,
-        "Resources" => resources_id,
-    };
-
-    let form_stream = Stream::new(form_dict, content.encode()?);
-    let form_id = output.add_object(form_stream);
-
-    Ok(form_id)
-}
-
-fn get_resources_dict(doc: &Document, page: &Dictionary) -> lopdf::Result<Dictionary> {
-    if let Ok(res_ref) = page.get(b"Resources") {
-        match res_ref {
-            Object::Reference(res_id) => Ok(doc.get_object(*res_id)?.as_dict()?.clone()),
-            Object::Dictionary(dict) => Ok(dict.clone()),
-            _ => Ok(Dictionary::new()),
-        }
-    } else {
-        Ok(Dictionary::new())
-    }
-}
-
-fn get_content_operations(doc: &Document, content_ref: &Object) -> lopdf::Result<Vec<Operation>> {
-    // Note it is critical that we use decompressed_content() in each of these
-    // cases as we can't (and don't need to) anticipate whether or not the
-    // input PDF elements are compressed.
-    match content_ref {
-        Object::Reference(content_id) => {
-            let content_obj = doc.get_object(*content_id)?;
-            if let Ok(stream) = content_obj.as_stream() {
-                let decoded = stream.decompressed_content()?;
-                Ok(Content::decode(&decoded)?.operations)
-            } else {
-                Ok(Vec::new())
-            }
-        }
-        Object::Array(arr) => {
-            let mut operations = Vec::new();
-            for item in arr {
-                if let Object::Reference(id) = item {
-                    let obj = doc.get_object(*id)?;
-                    if let Ok(stream) = obj.as_stream() {
-                        let decoded = stream.decompressed_content()?;
-                        operations.extend(Content::decode(&decoded)?.operations);
-                    }
-                }
-            }
-            Ok(operations)
-        }
-        _ => Ok(Vec::new()),
-    }
-}
-
-fn copy_resources_deep(
-    source: &Document,
-    resources: &Dictionary,
-    output: &mut Document,
-    cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<ObjectId> {
-    let mut new_resources = Dictionary::new();
-
-    for (key, value) in resources.iter() {
-        let new_value = copy_object_deep(source, value, output, cache)?;
-        new_resources.set(key.clone(), new_value);
-    }
-
-    let res_id = output.add_object(Object::Dictionary(new_resources));
-
-    Ok(res_id)
-}
-
-fn copy_object_deep(
-    source: &Document,
-    obj: &Object,
-    output: &mut Document,
-    cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<Object> {
-    match obj {
-        Object::Reference(id) => {
-            // Check cache first to avoid duplicating objects
-            if let Some(&cached_id) = cache.get(id) {
-                return Ok(Object::Reference(cached_id));
-            }
-
-            // Dereference and copy the actual object
-            let referenced_obj = source.get_object(*id)?;
-            let new_id = match referenced_obj {
-                Object::Stream(stream) => {
-                    // For streams (including images), recursively copy all dictionary values
-                    // to properly handle ColorSpace, SMask, and other referenced objects
-                    let mut new_dict = Dictionary::new();
-
-                    for (k, v) in stream.dict.iter() {
-                        let new_v = copy_object_deep(source, v, output, cache)?;
-                        new_dict.set(k.clone(), new_v);
-                    }
-
-                    let new_stream = Stream::new(new_dict, stream.content.clone());
-                    output.add_object(Object::Stream(new_stream))
-                }
-                Object::Dictionary(dict) => {
-                    let mut new_dict = Dictionary::new();
-                    for (k, v) in dict.iter() {
-                        let new_v = copy_object_deep(source, v, output, cache)?;
-                        new_dict.set(k.clone(), new_v);
-                    }
-                    output.add_object(Object::Dictionary(new_dict))
-                }
-                _ => {
-                    output.add_object(referenced_obj.clone())
+    // Read original MediaBox to get actual content dimensions
+    let original_mediabox = page.get(b"MediaBox")?;
+    let (actual_width, actual_height) = match original_mediabox {
+        Object::Array(arr) if arr.len() == 4 => {
+            // MediaBox format: [x1, y1, x2, y2]
+            // Convert to f64 handling both Integer and Real types
+            let to_f64 = |obj: &Object| -> lopdf::Result<f64> {
+                match obj {
+                    Object::Integer(i) => Ok(*i as f64),
+                    Object::Real(r) => Ok(*r as f64),
+                    _ => Err(lopdf::Error::PageNumberNotFound(0)),
                 }
             };
+            let x1 = to_f64(&arr[0])?;
+            let y1 = to_f64(&arr[1])?;
+            let x2 = to_f64(&arr[2])?;
+            let y2 = to_f64(&arr[3])?;
+            (x2 - x1, y2 - y1)
+        }
+        _ => return Err(lopdf::Error::PageNumberNotFound(0)),
+    };
 
-            // Cache the mapping
-            cache.insert(*id, new_id);
-            Ok(Object::Reference(new_id))
-        }
-        Object::Dictionary(dict) => {
-            let mut new_dict = Dictionary::new();
-            for (k, v) in dict.iter() {
-                let new_v = copy_object_deep(source, v, output, cache)?;
-                new_dict.set(k.clone(), new_v);
+    let mut new_page = page;
+
+    // Change MediaBox to A4 (595×842)
+    new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
+
+    // Center actual content on A4
+    let content_x: f64 = (595.0 - actual_width) / 2.0;
+    let content_y: f64 = (842.0 - actual_height) / 2.0;
+
+    // Calculate trim area position (centered on A4)
+    let trim_x: f64 = (595.0 - trim_width) / 2.0;
+    let trim_y: f64 = (842.0 - trim_height) / 2.0;
+
+    // Create wrapper stream: crop marks + transformation start
+    let mut start_ops = Vec::new();
+    // Draw crop marks at trim size position
+    start_ops.extend(generate_crop_marks(trim_x, trim_y, trim_width, trim_height));
+    start_ops.push(Operation::new("q", vec![]));
+    start_ops.push(Operation::new("cm", vec![
+        1.into(),
+        0.into(),
+        0.into(),
+        1.into(),
+        content_x.into(),
+        content_y.into(),
+    ]));
+
+    let start_content = Content { operations: start_ops };
+    let start_stream = Stream::new(dictionary! {}, start_content.encode()?);
+    let start_id = doc.add_object(start_stream);
+
+    // Create wrapper stream: transformation end
+    let end_ops = vec![Operation::new("Q", vec![])];
+    let end_content = Content { operations: end_ops };
+    let end_stream = Stream::new(dictionary! {}, end_content.encode()?);
+    let end_id = doc.add_object(end_stream);
+
+    // Build Contents array preserving original content objects
+    // Per PDF spec, Contents can be a single stream Reference or an Array of References.
+    // We convert to Array format to sandwich the original content between our wrappers.
+    // This is harmless - viewers simply concatenate streams in order.
+    let mut contents_array = vec![Object::Reference(start_id)];
+
+    if let Ok(original_contents) = new_page.get(b"Contents") {
+        match original_contents {
+            Object::Reference(_) => {
+                // Single stream (typical case for Typst PDFs) - add as-is
+                contents_array.push(original_contents.clone());
             }
-            Ok(Object::Dictionary(new_dict))
-        }
-        Object::Array(arr) => {
-            let mut new_arr = Vec::new();
-            for item in arr {
-                let new_item = copy_object_deep(source, item, output, cache)?;
-                new_arr.push(new_item);
+            Object::Array(arr) => {
+                // Already an array - preserve all elements
+                contents_array.extend(arr.iter().cloned());
             }
-            Ok(Object::Array(new_arr))
+            _ => {
+                // Unexpected type, but handle gracefully (blank page)
+            }
         }
-        _ => Ok(obj.clone()),
     }
+
+    contents_array.push(Object::Reference(end_id));
+    new_page.set("Contents", Object::Array(contents_array));
+
+    // Replace page in document
+    doc.objects.insert(page_id, Object::Dictionary(new_page));
+
+    Ok(())
 }
