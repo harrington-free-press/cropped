@@ -2,16 +2,19 @@ use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
+use tracing::{debug, info};
 
 /// Combines a manuscript PDF with a crop marks template.
 /// Each page of the manuscript is stamped onto a template page.
 pub fn combine(
     template_path: &Path,
-    manuscript_path: &Path,
     output_path: &Path,
+    manuscript_path: &Path,
 ) -> lopdf::Result<()> {
     let template = Document::load(template_path)?;
     let manuscript = Document::load(manuscript_path)?;
+
+    info!("Files loaded");
 
     let mut output = Document::with_version("1.7");
 
@@ -83,6 +86,8 @@ pub fn combine(
     }
 
     output.compress();
+
+    info!("Save output");
 
     output.save(output_path)?;
 
