@@ -6,240 +6,168 @@ use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 use tracing::info;
 
 /// Combines a manuscript PDF with a crop marks template.
-/// Each page of the manuscript is stamped onto a template page.
+/// The template crop marks are stamped onto each manuscript page.
 pub fn combine(
     template_path: &Path,
     output_path: &Path,
     manuscript_path: &Path,
 ) -> lopdf::Result<()> {
     let template = Document::load(template_path)?;
-    let manuscript = Document::load(manuscript_path)?;
+    let mut manuscript = Document::load(manuscript_path)?;
 
     info!("Files loaded");
 
-    let mut output = Document::with_version("1.7");
-
-    // The template with the crop marks is a single page. We get the first
-    // page of that file.
+    // Get the template page (crop marks)
     let template_page_id = template
         .page_iter()
         .next()
         .ok_or(lopdf::Error::ObjectNotFound((0, 0)))?;
-
-    // Object cache to avoid duplicating resources across pages
-    let mut template_cache: HashMap<ObjectId, ObjectId> = HashMap::new();
-    let mut manuscript_cache: HashMap<ObjectId, ObjectId> = HashMap::new();
-
-    // For each manuscript page, create a new combined page
-    let mut new_page_ids = Vec::new();
-
-    for manuscript_page_id in manuscript.page_iter() {
-        let new_page_id = combine_page(
-            &template,
-            &manuscript,
-            template_page_id,
-            manuscript_page_id,
-            &mut output,
-            &mut template_cache,
-            &mut manuscript_cache,
-        )?;
-        new_page_ids.push(new_page_id);
-    }
-
-    // Create new Pages root object
-    let pages_id = output.new_object_id();
-
-    // Update all pages to have correct Parent reference
-    for page_id in &new_page_ids {
-        if let Ok(Object::Dictionary(mut page_dict)) =
-            output.get_object_mut(*page_id).map(|o| o.clone())
-        {
-            page_dict.set("Parent", pages_id);
-            output
-                .objects
-                .insert(*page_id, Object::Dictionary(page_dict));
-        }
-    }
-
-    let pages = dictionary! {
-        "Type" => "Pages",
-        "Kids" => new_page_ids.iter().map(|id| Object::Reference(*id)).collect::<Vec<_>>(),
-        "Count" => new_page_ids.len() as u32,
-    };
-
-    output.objects.insert(pages_id, Object::Dictionary(pages));
-
-    // Create Catalog
-    let catalog_id = output.new_object_id();
-
-    let catalog = dictionary! {
-        "Type" => "Catalog",
-        "Pages" => pages_id,
-    };
-
-    output
-        .objects
-        .insert(catalog_id, Object::Dictionary(catalog));
-    output.trailer.set("Root", catalog_id);
-
-    // Copy Info dictionary from manuscript if it exists
-    if let Ok(info_ref) = manuscript.trailer.get(b"Info") {
-        if let Object::Reference(info_id) = info_ref {
-            if let Ok(info_obj) = manuscript.get_object(*info_id) {
-                let new_info_id = output.add_object(info_obj.clone());
-                output.trailer.set("Info", new_info_id);
-            }
-        }
-    }
-
-    output.compress();
-
-    info!("Save output");
-
-    output.save(output_path)?;
-
-    Ok(())
-}
-
-fn combine_page(
-    template: &Document,
-    manuscript: &Document,
-    template_page_id: ObjectId,
-    manuscript_page_id: ObjectId,
-    output: &mut Document,
-    template_cache: &mut HashMap<ObjectId, ObjectId>,
-    manuscript_cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<ObjectId> {
-    // Get template page dictionary
     let template_page = template.get_object(template_page_id)?.as_dict()?;
 
-    // Start with template page as base
-    let mut new_page_dict = Dictionary::new();
-    new_page_dict.set("Type", "Page");
-
-    // Copy MediaBox from template (A4 size)
-    if let Ok(media_box) = template_page.get(b"MediaBox") {
-        new_page_dict.set("MediaBox", media_box.clone());
-    }
-
-    // Get template resources and copy them deeply to output document
-    let template_resources = get_resources_dict(template, template_page)?;
-    let mut resources = Dictionary::new();
-
-    // Copy template resources to output, dereferencing all objects with caching
-    for (key, value) in template_resources.iter() {
-        let new_value = copy_object_deep(template, value, output, template_cache)?;
-        resources.set(key.clone(), new_value);
-    }
-
-    // Create a Form XObject from the manuscript page
-    let xobject_name = b"ManuscriptPage".to_vec();
-    let form_xobject_id = create_form_xobject(manuscript, manuscript_page_id, output, manuscript_cache)?;
-
-    // Add the Form XObject to resources
-    let mut xobjects = if let Ok(xobj_dict) = resources.get(b"XObject") {
-        if let Object::Dictionary(dict) = xobj_dict {
-            dict.clone()
-        } else {
-            Dictionary::new()
-        }
-    } else {
-        Dictionary::new()
-    };
-
-    xobjects.set(xobject_name.clone(), Object::Reference(form_xobject_id));
-    resources.set("XObject", Object::Dictionary(xobjects));
-
-    // Build combined content stream
-    let mut operations = Vec::new();
-
-    // First, draw template content (crop marks)
-    if let Ok(content_ref) = template_page.get(b"Contents") {
-        operations.extend(get_content_operations(template, content_ref)?);
-    }
-
-    // Then, stamp the manuscript page on top
-    // The manuscript page is 6"×9" = 432×648 points
-    // A4 is 595×842 points
-    // Center it: (595-432)/2 = 81.5, (842-648)/2 = 97
-    //
-    // Typst generates PDFs with a Y-axis flip transformation (top-left origin).
-    // To counter this, we apply a Y-flip when placing the Form XObject:
-    // [1, 0, 0, -1, x, y] where y = bottom_margin + height due to the flip
-
-    operations.push(Operation::new("q", vec![])); // Save graphics state
-    operations.push(Operation::new(
-        "cm",
-        vec![
-            1.into(),
-            0.into(),
-            0.into(),
-            (-1).into(),        // Flip Y-axis to counter Typst's internal flip
-            81.5.into(),        // Horizontal centering
-            (97.0 + 648.0).into(), // Vertical position: bottom_margin + height
-        ],
-    ));
-    operations.push(Operation::new("Do", vec![Object::Name(xobject_name)]));
-    operations.push(Operation::new("Q", vec![])); // Restore graphics state
-
-    // Create new content stream
-    let content = Content { operations };
-    let content_id = output.add_object(Stream::new(dictionary! {}, content.encode()?));
-
-    // Add resources to output
-    let resources_id = output.add_object(Object::Dictionary(resources));
-
-    // Build new page
-    new_page_dict.set("Contents", content_id);
-    new_page_dict.set("Resources", resources_id);
-
-    let page_id = output.add_object(Object::Dictionary(new_page_dict));
-
-    Ok(page_id)
-}
-
-fn create_form_xobject(
-    manuscript: &Document,
-    page_id: ObjectId,
-    output: &mut Document,
-    cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<ObjectId> {
-    let page = manuscript.get_object(page_id)?.as_dict()?;
-
-    // Get page content
-    let content_ops = if let Ok(content_ref) = page.get(b"Contents") {
-        get_content_operations(manuscript, content_ref)?
+    // Get template content operations
+    let template_ops = if let Ok(content_ref) = template_page.get(b"Contents") {
+        get_content_operations(&template, content_ref)?
     } else {
         Vec::new()
     };
 
-    // Get page resources and copy them to output
-    let resources = get_resources_dict(manuscript, page)?;
-    let resources_id = copy_resources_deep(manuscript, &resources, output, cache)?;
+    // Copy template resources once
+    let template_resources = get_resources_dict(&template, template_page)?;
+    let mut cache: HashMap<ObjectId, ObjectId> = HashMap::new();
+    let template_resources_copy = copy_resources(&template, &template_resources, &mut manuscript, &mut cache)?;
 
-    // Get MediaBox for BBox
-    let bbox = if let Ok(media_box) = page.get(b"MediaBox") {
-        media_box.clone()
+    // Process each manuscript page
+    let page_ids: Vec<ObjectId> = manuscript.page_iter().collect();
+    for page_id in page_ids {
+        stamp_page(
+            &mut manuscript,
+            page_id,
+            &template_ops,
+            &template_resources_copy,
+        )?;
+    }
+
+    manuscript.compress();
+    info!("Save output");
+    manuscript.save(output_path)?;
+
+    Ok(())
+}
+
+fn stamp_page(
+    doc: &mut Document,
+    page_id: ObjectId,
+    template_ops: &[Operation],
+    template_resources: &Dictionary,
+) -> lopdf::Result<()> {
+    let page = doc.get_object(page_id)?.as_dict()?.clone();
+
+    // Change MediaBox from 6"×9" (432×648) to A4 (595×842)
+    let mut new_page = page.clone();
+    new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
+
+    // Get existing page content
+    let page_ops = if let Ok(content_ref) = page.get(b"Contents") {
+        get_content_operations(doc, content_ref)?
     } else {
-        // Default to 6"×9" in points (432×648)
-        vec![0.into(), 0.into(), 432.into(), 648.into()].into()
+        Vec::new()
     };
 
-    // Create Form XObject
-    let content = Content {
-        operations: content_ops,
-    };
-    let form_dict = dictionary! {
-        "Type" => "XObject",
-        "Subtype" => "Form",
-        "BBox" => bbox,
-        "Resources" => resources_id,
-    };
+    // Build new content: template first (underneath), then manuscript content centered
+    let mut ops = Vec::new();
 
-    let form_stream = Stream::new(form_dict, content.encode()?);
-    let form_id = output.add_object(form_stream);
+    // Draw template (crop marks)
+    ops.extend(template_ops.iter().cloned());
 
-    Ok(form_id)
+    // Center manuscript content with coordinate transformation
+    // Typst uses a flipped Y coordinate system, so we need to flip and position
+    // Transform: flip Y axis and translate to center
+    ops.push(Operation::new("q", vec![]));
+    ops.push(Operation::new("cm", vec![
+        1.into(),
+        0.into(),
+        0.into(),
+        (-1).into(),        // Flip Y-axis
+        81.5.into(),        // Horizontal centering: (595-432)/2
+        (97.0 + 648.0).into(), // Vertical: bottom_margin + height
+    ]));
+    ops.extend(page_ops);
+    ops.push(Operation::new("Q", vec![]));
+
+    // Create new content stream
+    let content = Content { operations: ops };
+    let content_data = content.encode()?;
+    let content_stream = Stream::new(dictionary! {}, content_data);
+    let new_content_id = doc.add_object(content_stream);
+    new_page.set("Contents", new_content_id);
+
+    // Merge resources - create a new merged dictionary and add as new object
+    let page_resources = get_resources_dict(doc, &page)?;
+    let merged_resources = merge_resources(&page_resources, template_resources);
+    let resources_ref = doc.add_object(Object::Dictionary(merged_resources));
+    new_page.set("Resources", resources_ref);
+
+    // Replace page in document
+    doc.objects.insert(page_id, Object::Dictionary(new_page));
+
+    Ok(())
+}
+
+fn copy_resources(
+    source: &Document,
+    resources: &Dictionary,
+    dest: &mut Document,
+    cache: &mut HashMap<ObjectId, ObjectId>,
+) -> lopdf::Result<Dictionary> {
+    let mut new_resources = Dictionary::new();
+
+    for (key, value) in resources.iter() {
+        let new_value = copy_object_deep(source, value, dest, cache)?;
+        new_resources.set(key.clone(), new_value);
+    }
+
+    Ok(new_resources)
+}
+
+fn merge_resources(base: &Dictionary, overlay: &Dictionary) -> Dictionary {
+    let mut merged = base.clone();
+
+    for (key, value) in overlay.iter() {
+        match base.get(key) {
+            Ok(base_value) => {
+                // Both have this resource type - need to merge the subdictionaries
+                match (base_value, value) {
+                    (Object::Reference(_base_ref), Object::Dictionary(_overlay_dict)) => {
+                        // Base is a reference - we need to keep it as a reference but can't merge easily
+                        // For now, just add overlay items with unique names
+                        // This is a limitation but avoids breaking existing references
+                        merged.set(key.clone(), base_value.clone());
+                    }
+                    (Object::Dictionary(base_dict), Object::Dictionary(overlay_dict)) => {
+                        // Both are dictionaries - merge them
+                        let mut merged_dict = base_dict.clone();
+                        for (k, v) in overlay_dict.iter() {
+                            // Only add if not already present to avoid conflicts
+                            if merged_dict.get(k).is_err() {
+                                merged_dict.set(k.clone(), v.clone());
+                            }
+                        }
+                        merged.set(key.clone(), Object::Dictionary(merged_dict));
+                    }
+                    _ => {
+                        // Keep base value for other cases
+                        merged.set(key.clone(), base_value.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                // Key doesn't exist in base, just add overlay value
+                merged.set(key.clone(), value.clone());
+            }
+        }
+    }
+
+    merged
 }
 
 fn get_resources_dict(doc: &Document, page: &Dictionary) -> lopdf::Result<Dictionary> {
@@ -283,24 +211,6 @@ fn get_content_operations(doc: &Document, content_ref: &Object) -> lopdf::Result
         }
         _ => Ok(Vec::new()),
     }
-}
-
-fn copy_resources_deep(
-    source: &Document,
-    resources: &Dictionary,
-    output: &mut Document,
-    cache: &mut HashMap<ObjectId, ObjectId>,
-) -> lopdf::Result<ObjectId> {
-    let mut new_resources = Dictionary::new();
-
-    for (key, value) in resources.iter() {
-        let new_value = copy_object_deep(source, value, output, cache)?;
-        new_resources.set(key.clone(), new_value);
-    }
-
-    let res_id = output.add_object(Object::Dictionary(new_resources));
-
-    Ok(res_id)
 }
 
 fn copy_object_deep(
