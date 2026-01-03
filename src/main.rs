@@ -1,5 +1,6 @@
 use clap::{Arg, ArgAction, Command, value_parser};
-use std::path::{Path, PathBuf};
+use owo_colors::OwoColorize;
+use std::path::PathBuf;
 use tracing::{debug, info};
 use tracing_subscriber;
 
@@ -74,9 +75,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => &default,
     };
 
+    if !template_path.exists() {
+        eprintln!(
+            "{}: Template PDF not found.",
+            "error".bright_red()
+        );
+        std::process::exit(1);
+    }
+
     let output_path = matches.get_one::<PathBuf>("output").unwrap();
 
     let manuscript_path = matches.get_one::<PathBuf>("manuscript").unwrap();
+
+    if !manuscript_path.exists() {
+        eprintln!(
+            "{}: Input manuscript PDF not found.",
+            "error".bright_red()
+        );
+        std::process::exit(1);
+    }
 
     debug!(?template_path);
     debug!(?output_path);
