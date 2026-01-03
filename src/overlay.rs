@@ -2,7 +2,7 @@ use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Combines a manuscript PDF with a crop marks template.
 /// Each page of the manuscript is stamped onto a template page.
@@ -113,8 +113,15 @@ fn combine_page(
         new_page_dict.set("MediaBox", media_box.clone());
     }
 
-    // Get or create resources, starting with template resources
-    let mut resources = get_resources_dict(template, template_page)?;
+    // Get template resources and copy them deeply to output document
+    let template_resources = get_resources_dict(template, template_page)?;
+    let mut resources = Dictionary::new();
+
+    // Copy template resources to output, dereferencing all objects
+    for (key, value) in template_resources.iter() {
+        let new_value = copy_object_deep(template, value, output)?;
+        resources.set(key.clone(), new_value);
+    }
 
     // Create a Form XObject from the manuscript page
     let xobject_name = b"ManuscriptPage".to_vec();
@@ -234,27 +241,31 @@ fn get_resources_dict(doc: &Document, page: &Dictionary) -> lopdf::Result<Dictio
 }
 
 fn get_content_operations(doc: &Document, content_ref: &Object) -> lopdf::Result<Vec<Operation>> {
+    // Note it is critical that we use decompressed_content() in each of these
+    // cases as we can't (and don't need to) anticipate whether or not the
+    // input PDF elements are compressed.
     match content_ref {
         Object::Reference(content_id) => {
             let content_obj = doc.get_object(*content_id)?;
             if let Ok(stream) = content_obj.as_stream() {
-                Ok(Content::decode(&stream.content)?.operations)
+                let decoded = stream.decompressed_content()?;
+                Ok(Content::decode(&decoded)?.operations)
             } else {
                 Ok(Vec::new())
             }
         }
         Object::Array(arr) => {
-            // Contents can be an array of streams
-            let mut all_ops = Vec::new();
+            let mut operations = Vec::new();
             for item in arr {
                 if let Object::Reference(id) = item {
                     let obj = doc.get_object(*id)?;
                     if let Ok(stream) = obj.as_stream() {
-                        all_ops.extend(Content::decode(&stream.content)?.operations);
+                        let decoded = stream.decompressed_content()?;
+                        operations.extend(Content::decode(&decoded)?.operations);
                     }
                 }
             }
-            Ok(all_ops)
+            Ok(operations)
         }
         _ => Ok(Vec::new()),
     }
