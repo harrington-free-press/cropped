@@ -318,10 +318,19 @@ fn copy_object_deep(
 
             // Dereference and copy the actual object
             let referenced_obj = source.get_object(*id)?;
-            match referenced_obj {
+            let new_id = match referenced_obj {
                 Object::Stream(stream) => {
-                    let new_id = output.add_object(Object::Stream(stream.clone()));
-                    Ok(Object::Reference(new_id))
+                    // For streams (including images), recursively copy all dictionary values
+                    // to properly handle ColorSpace, SMask, and other referenced objects
+                    let mut new_dict = Dictionary::new();
+
+                    for (k, v) in stream.dict.iter() {
+                        let new_v = copy_object_deep(source, v, output, cache)?;
+                        new_dict.set(k.clone(), new_v);
+                    }
+
+                    let new_stream = Stream::new(new_dict, stream.content.clone());
+                    output.add_object(Object::Stream(new_stream))
                 }
                 Object::Dictionary(dict) => {
                     let mut new_dict = Dictionary::new();
