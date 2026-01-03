@@ -1,5 +1,5 @@
-use clap::{Arg, ArgAction, Command};
-use std::path::Path;
+use clap::{Arg, ArgAction, Command, value_parser};
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 use tracing_subscriber;
 
@@ -48,44 +48,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('o')
                 .long("output")
                 .value_name("OUTPUT")
+                .value_parser(value_parser!(PathBuf))
                 .help("Path for the output PDF.")
                 .required(true),
         )
         .arg(
             Arg::new("manuscript")
                 .value_name("INPUT")
+                .value_parser(value_parser!(PathBuf))
                 .help("Path to the input manuscript PDF to be placed into the template."),
         )
         .get_matches();
 
     info!("cropped application started");
-    debug!("Command-line arguments parsed successfully");
 
     //
     // Extract command-line arguments
     //
 
-    let template_path = Path::new(match matches.get_one::<String>("template") {
-        Some(argument) => argument.as_str(),
-        None => TEMPLATE,
-    });
+    let default = PathBuf::from(TEMPLATE);
+    let template = match matches.get_one::<PathBuf>("template") {
+        Some(path) => path,
+        None => &default,
+    };
 
-    let output_path = Path::new(match matches.get_one::<String>("output") {
-        Some(argument) => argument.as_str(),
-        None => {
-            eprintln!("Output path required");
-            std::process::exit(1);
-        }
-    });
+    let output = matches.get_one::<PathBuf>("output").unwrap();
 
-    let manuscript_path = matches.get_one::<String>("manuscript").unwrap();
+    let manuscript = matches.get_one::<PathBuf>("manuscript").unwrap();
+
+    debug!(?template);
+    debug!(?output);
+    debug!(?manuscript);
 
     // Combine the PDFs
-    overlay::combine(
-        template_path,
-        output_path,
-        Path::new(manuscript_path),
-    )?;
+    overlay::combine(template, output, manuscript)?;
 
     info!("PDF combination completed successfully");
 
