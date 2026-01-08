@@ -6,21 +6,29 @@ const FONT_PATH: &str = "/usr/share/fonts/levien-inconsolata/Inconsolata-Regular
 
 /// Embed a TrueType font into the PDF document.
 ///
-/// Creates the necessary font descriptor, font file stream, and font dictionary
-/// objects required for PDF font embedding. Returns the ObjectId of the font
-/// dictionary which can be referenced from page resources.
-pub fn embed_font(doc: &mut Document) -> lopdf::Result<ObjectId> {
-    let font_data = fs::read(FONT_PATH)
-        .map_err(|e| lopdf::Error::IO(e))?;
+/// Creates the necessary font descriptor, font file stream, and font
+/// dictionary objects required for PDF font embedding. Returns the ObjectId
+/// of the font dictionary and the width of a monospaced character, in points,
+/// at 1pt font size.
+pub fn embed_font(doc: &mut Document) -> lopdf::Result<(ObjectId, f64)> {
+    let font_data = fs::read(FONT_PATH).map_err(|e| lopdf::Error::IO(e))?;
 
-    let face = ttf_parser::Face::parse(&font_data, 0)
-        .map_err(|_| lopdf::Error::PageNumberNotFound(0))?;
+    let face =
+        ttf_parser::Face::parse(&font_data, 0).map_err(|_| lopdf::Error::PageNumberNotFound(0))?;
 
     // Extract metrics
     let bbox = face.global_bounding_box();
     let ascender = face.ascender();
     let descender = face.descender();
     let cap_height = face.capital_height().unwrap_or(700);
+
+    // Get character width for monospaced font (use '0' as representative glyph)
+    let units_per_em = face.units_per_em() as f64;
+    let char_width   = face
+        .glyph_index('0')
+        .and_then(|glyph_id| face.glyph_hor_advance(glyph_id))
+        .map(|advance| advance as f64 / units_per_em)
+        .unwrap_or(0.6);
 
     // Create font file stream (clone font_data since face still borrows it)
     let font_stream = Stream::new(
@@ -61,5 +69,5 @@ pub fn embed_font(doc: &mut Document) -> lopdf::Result<ObjectId> {
     };
     let font_id = doc.add_object(font_dict);
 
-    Ok(font_id)
+    Ok((font_id, char_width))
 }

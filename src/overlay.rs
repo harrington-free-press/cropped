@@ -33,7 +33,7 @@ pub fn combine(
     info!("Manuscript loaded");
 
     // Embed font once for all pages
-    let font_id = fonts::embed_font(&mut manuscript_document)?;
+    let (font_id, char_width) = fonts::embed_font(&mut manuscript_document)?;
     info!("Font embedded");
 
     // Process each manuscript page
@@ -45,6 +45,7 @@ pub fn combine(
             trim_width,
             trim_height,
             font_id,
+            char_width,
             index + 1,
         )?;
     }
@@ -185,16 +186,26 @@ fn generate_crop_marks(
 /// * `page_num` - The page number to display
 /// * `page_width` - Width of the page (typically 595 for A4)
 /// * `font_name` - The resource name for the font (e.g., "F1")
+/// * `char_width` - Character width at 1pt font size
 ///
-/// The page number is centered horizontally and positioned 1cm (~28.35 pt) from the bottom edge.
-fn generate_page_number(page_num: usize, page_width: f64, font_name: &str) -> Vec<Operation> {
+/// The page number is positioned at bottom right, 1cm from both edges.
+fn generate_page_number(
+    page_num: usize,
+    page_width: f64,
+    font_name: &str,
+    char_width: f64,
+) -> Vec<Operation> {
     let mut ops = Vec::new();
 
-    // Position 1cm from bottom (28.35 points)
+    // Position 1cm from bottom and right edges (28.35 points)
     let y_pos = 28.35;
-    let x_pos = page_width / 2.0;
 
     let text = format!("{}", page_num);
+
+    // Calculate x position to right-align using actual font metrics
+    let font_size = 10.0;
+    let text_width = text.len() as f64 * char_width * font_size;
+    let x_pos = page_width - 28.35 - text_width;
 
     // Begin text object
     ops.push(Operation::new("BT", vec![]));
@@ -202,10 +213,8 @@ fn generate_page_number(page_num: usize, page_width: f64, font_name: &str) -> Ve
     // Set font (Inconsolata at 10pt)
     ops.push(Operation::new("Tf", vec![font_name.into(), 10.into()]));
 
-    // Position text (roughly centered - Inconsolata is monospaced ~6pt per char at 10pt)
-    let approx_width = text.len() as f64 * 6.0;
-    let centered_x = x_pos - (approx_width / 2.0);
-    ops.push(Operation::new("Td", vec![centered_x.into(), y_pos.into()]));
+    // Position text at bottom right
+    ops.push(Operation::new("Td", vec![x_pos.into(), y_pos.into()]));
 
     // Show text
     ops.push(Operation::new(
@@ -237,6 +246,7 @@ fn create_overlay_xobject(
     trim_width: f64,
     trim_height: f64,
     font_id: ObjectId,
+    char_width: f64,
 ) -> lopdf::Result<ObjectId> {
     let mut ops = Vec::new();
 
@@ -245,7 +255,12 @@ fn create_overlay_xobject(
 
     // Draw page number
     let font_name = "F1";
-    ops.extend(generate_page_number(page_num, 595.0, font_name));
+    ops.extend(generate_page_number(
+        page_num,
+        595.0,
+        font_name,
+        char_width,
+    ));
 
     // Create the Form XObject's content
     let content = Content { operations: ops };
@@ -308,6 +323,7 @@ fn stamp_page(
     trim_width: f64,
     trim_height: f64,
     font_id: ObjectId,
+    char_width: f64,
     page_num: usize,
 ) -> lopdf::Result<()> {
     // Clone the page dictionary once so we can mutate doc
@@ -353,6 +369,7 @@ fn stamp_page(
         trim_width,
         trim_height,
         font_id,
+        char_width,
     )?;
 
     // Add the overlay XObject to page Resources
