@@ -39,7 +39,14 @@ pub fn combine(
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
     for (index, page_id) in page_ids.iter().enumerate() {
-        stamp_page(&mut manuscript_document, *page_id, trim_width, trim_height, font_id, index + 1)?;
+        stamp_page(
+            &mut manuscript_document,
+            *page_id,
+            trim_width,
+            trim_height,
+            font_id,
+            index + 1,
+        )?;
     }
 
     manuscript_document.compress();
@@ -84,42 +91,90 @@ fn generate_crop_marks(
 
     // Bottom-left corner (horizontal and vertical marks)
     // Horizontal mark (left side)
-    ops.push(Operation::new("m", vec![(left - mark_offset - mark_length).into(), bottom.into()]));
-    ops.push(Operation::new("l", vec![(left - mark_offset).into(), bottom.into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![(left - mark_offset - mark_length).into(), bottom.into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![(left - mark_offset).into(), bottom.into()],
+    ));
     ops.push(Operation::new("S", vec![]));
     // Vertical mark (bottom side)
-    ops.push(Operation::new("m", vec![left.into(), (bottom - mark_offset - mark_length).into()]));
-    ops.push(Operation::new("l", vec![left.into(), (bottom - mark_offset).into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![left.into(), (bottom - mark_offset - mark_length).into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![left.into(), (bottom - mark_offset).into()],
+    ));
     ops.push(Operation::new("S", vec![]));
 
     // Bottom-right corner
     // Horizontal mark (right side)
-    ops.push(Operation::new("m", vec![(right + mark_offset).into(), bottom.into()]));
-    ops.push(Operation::new("l", vec![(right + mark_offset + mark_length).into(), bottom.into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![(right + mark_offset).into(), bottom.into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![(right + mark_offset + mark_length).into(), bottom.into()],
+    ));
     ops.push(Operation::new("S", vec![]));
     // Vertical mark (bottom side)
-    ops.push(Operation::new("m", vec![right.into(), (bottom - mark_offset - mark_length).into()]));
-    ops.push(Operation::new("l", vec![right.into(), (bottom - mark_offset).into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![right.into(), (bottom - mark_offset - mark_length).into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![right.into(), (bottom - mark_offset).into()],
+    ));
     ops.push(Operation::new("S", vec![]));
 
     // Top-left corner
     // Horizontal mark (left side)
-    ops.push(Operation::new("m", vec![(left - mark_offset - mark_length).into(), top.into()]));
-    ops.push(Operation::new("l", vec![(left - mark_offset).into(), top.into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![(left - mark_offset - mark_length).into(), top.into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![(left - mark_offset).into(), top.into()],
+    ));
     ops.push(Operation::new("S", vec![]));
     // Vertical mark (top side)
-    ops.push(Operation::new("m", vec![left.into(), (top + mark_offset).into()]));
-    ops.push(Operation::new("l", vec![left.into(), (top + mark_offset + mark_length).into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![left.into(), (top + mark_offset).into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![left.into(), (top + mark_offset + mark_length).into()],
+    ));
     ops.push(Operation::new("S", vec![]));
 
     // Top-right corner
     // Horizontal mark (right side)
-    ops.push(Operation::new("m", vec![(right + mark_offset).into(), top.into()]));
-    ops.push(Operation::new("l", vec![(right + mark_offset + mark_length).into(), top.into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![(right + mark_offset).into(), top.into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![(right + mark_offset + mark_length).into(), top.into()],
+    ));
     ops.push(Operation::new("S", vec![]));
     // Vertical mark (top side)
-    ops.push(Operation::new("m", vec![right.into(), (top + mark_offset).into()]));
-    ops.push(Operation::new("l", vec![right.into(), (top + mark_offset + mark_length).into()]));
+    ops.push(Operation::new(
+        "m",
+        vec![right.into(), (top + mark_offset).into()],
+    ));
+    ops.push(Operation::new(
+        "l",
+        vec![right.into(), (top + mark_offset + mark_length).into()],
+    ));
     ops.push(Operation::new("S", vec![]));
 
     ops
@@ -153,12 +208,70 @@ fn generate_page_number(page_num: usize, page_width: f64, font_name: &str) -> Ve
     ops.push(Operation::new("Td", vec![centered_x.into(), y_pos.into()]));
 
     // Show text
-    ops.push(Operation::new("Tj", vec![Object::String(text.into_bytes(), lopdf::StringFormat::Literal)]));
+    ops.push(Operation::new(
+        "Tj",
+        vec![Object::String(
+            text.into_bytes(),
+            lopdf::StringFormat::Literal,
+        )],
+    ));
 
     // End text object
     ops.push(Operation::new("ET", vec![]));
 
     ops
+}
+
+/// Create a Form XObject containing crop marks and page number.
+///
+/// This Form XObject has its own self-contained Resources dictionary with the font,
+/// completely isolated from the page's Resources. This avoids the need to manipulate
+/// the page's Font dictionary.
+///
+/// Returns the ObjectId of the created Form XObject.
+fn create_overlay_xobject(
+    doc: &mut Document,
+    page_num: usize,
+    trim_x: f64,
+    trim_y: f64,
+    trim_width: f64,
+    trim_height: f64,
+    font_id: ObjectId,
+) -> lopdf::Result<ObjectId> {
+    let mut ops = Vec::new();
+
+    // Draw crop marks
+    ops.extend(generate_crop_marks(trim_x, trim_y, trim_width, trim_height));
+
+    // Draw page number
+    let font_name = "F1";
+    ops.extend(generate_page_number(page_num, 595.0, font_name));
+
+    // Create the Form XObject's content
+    let content = Content { operations: ops };
+
+    // Create Resources dictionary for the Form XObject with just our font
+    let mut font_dict = dictionary! {};
+    font_dict.set(font_name.as_bytes(), font_id);
+    let font_dict_id = doc.add_object(font_dict);
+
+    let resources = dictionary! {
+        "Font" => font_dict_id,
+    };
+
+    // Create the Form XObject
+    // BBox covers the entire A4 page so crop marks and page number can be anywhere
+    let xobject_stream = Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Form",
+            "BBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "Resources" => Object::Dictionary(resources),
+        },
+        content.encode()?,
+    );
+
+    Ok(doc.add_object(xobject_stream))
 }
 
 /// Adds crop marks and page number to a single manuscript page.
@@ -167,18 +280,25 @@ fn generate_page_number(page_num: usize, page_width: f64, font_name: &str) -> Ve
 /// operations avoiding the necessity we would otherwise have to decode and
 /// re-encode the stream's operations.
 ///
+/// Uses a Form XObject (the word "form" means a mathematical shape in the PDF
+/// specification) to contain crop marks and page number with its own
+/// Resources dictionary, avoiding any manipulation of the input page's font
+/// dictionary etc.
+///
 /// This creates a Contents array:
 ///
 /// [start_wrapper, original_content, end_wrapper]
 ///
 /// where:
 ///
-/// - start_wrapper: crop marks + page number + transformation start (q, cm)
+/// - start_wrapper: invoke overlay (Do /Overlay) + transformation start (q, cm)
 /// - original_content: preserved as-is (Reference or Array)
 /// - end_wrapper: transformation end (Q)
 ///
-/// This approach ensures original streams are never modified, minimizing the
-/// risk of corrupting the input document's content.
+/// The overlay is invoked BEFORE the transform so crop marks and page number
+/// remain at absolute A4 page coordinates. Only the manuscript is
+/// transformed. This approach ensures original streams are never modified,
+/// minimizing the risk of corrupting the input document's content.
 ///
 /// The trim size defines where crop marks are placed. The actual content (which
 /// may include bleed) is read from the original MediaBox and centered accordingly.
@@ -220,91 +340,98 @@ fn stamp_page(
     // Change MediaBox to A4 (595×842)
     new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
 
-    // Add font to page resources using a unique name
-    let font_name = "cropped-F1";
+    // Calculate trim area position (centered on A4)
+    let trim_x: f64 = (595.0 - trim_width) / 2.0;
+    let trim_y: f64 = (842.0 - trim_height) / 2.0;
 
-    // Resolve Resources (might be a Reference)
-    let resources_obj = new_page.get(b"Resources").ok();
-    let res_dict = if let Some(obj) = resources_obj {
-        match obj {
-            Object::Dictionary(d) => Some(d.clone()),
-            Object::Reference(id) => {
-                // Dereference the Resources object
-                doc.get_object(*id).ok().and_then(|o| o.as_dict().ok()).cloned()
-            }
-            _ => None,
-        }
-    } else {
-        // No Resources found, create minimal one
-        None
+    // Create Form XObject containing crop marks and page number with its own Resources
+    let overlay_xobject_id = create_overlay_xobject(
+        doc,
+        page_num,
+        trim_x,
+        trim_y,
+        trim_width,
+        trim_height,
+        font_id,
+    )?;
+
+    // Add the overlay XObject to page Resources
+    let xobject_name = "Overlay";
+
+    let res_dict = match new_page.get(b"Resources") {
+        Ok(Object::Dictionary(d)) => Some(d.clone()),
+        Ok(Object::Reference(id)) => match doc.get_object(*id) {
+            Ok(obj) => obj.as_dict().ok().cloned(),
+            Err(_) => None,
+        },
+        _ => None,
     };
 
-    if let Some(mut res_dict) = res_dict {
-        // Add or update Font dictionary (handling both direct dict and Reference)
-        let font_obj = res_dict.get(b"Font").ok();
-        let existing_font_dict = if let Some(obj) = font_obj {
-            match obj {
-                Object::Dictionary(d) => Some(d.clone()),
-                Object::Reference(id) => {
-                    // Dereference the Font dictionary
-                    doc.get_object(*id).ok().and_then(|o| o.as_dict().ok()).cloned()
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+    // Build XObject dictionary with existing XObjects + our overlay
+    let mut xobject_dict = dictionary! {};
 
-        if let Some(mut font_dict) = existing_font_dict {
-            font_dict.set(font_name, font_id);
-            res_dict.set("Font", font_dict);
-        } else {
-            let mut font_dict = dictionary! {};
-            font_dict.set(font_name, font_id);
-            res_dict.set("Font", font_dict);
+    if let Some(ref rd) = res_dict {
+        if let Ok(xobj_obj) = rd.get(b"XObject") {
+            let existing_xobjects = match xobj_obj {
+                Object::Dictionary(d) => Some(d),
+                Object::Reference(id) => match doc.get_object(*id) {
+                    Ok(obj) => obj.as_dict().ok(),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+
+            if let Some(xobjects) = existing_xobjects {
+                xobject_dict.extend(xobjects);
+            }
         }
-        new_page.set("Resources", Object::Dictionary(res_dict));
-    } else {
-        // No existing resources, create new one with just our font
-        let resources = dictionary! {
-            "Font" => dictionary! {
-                font_name => font_id,
-            },
-        };
-        new_page.set("Resources", Object::Dictionary(resources));
     }
+
+    xobject_dict.set(xobject_name.as_bytes(), overlay_xobject_id);
+    let xobject_dict_id = doc.add_object(xobject_dict);
+
+    // Build new Resources dictionary
+    let mut new_resources = dictionary! {};
+
+    if let Some(ref rd) = res_dict {
+        new_resources.extend(rd);
+    }
+
+    new_resources.set("XObject", xobject_dict_id);
+    new_page.set("Resources", Object::Dictionary(new_resources));
 
     // Center actual content on A4
     let content_x: f64 = (595.0 - actual_width) / 2.0;
     let content_y: f64 = (842.0 - actual_height) / 2.0;
 
-    // Calculate trim area position (centered on A4)
-    let trim_x: f64 = (595.0 - trim_width) / 2.0;
-    let trim_y: f64 = (842.0 - trim_height) / 2.0;
-
-    // Create wrapper stream: crop marks + page number + transformation start
+    // Create wrapper stream: invoke overlay XObject + transformation start
     let mut start_ops = Vec::new();
-    // Draw crop marks at trim size position
-    start_ops.extend(generate_crop_marks(trim_x, trim_y, trim_width, trim_height));
-    // Draw page number
-    start_ops.extend(generate_page_number(page_num, 595.0, font_name));
+    // Invoke the overlay XObject (draws crop marks and page number)
+    start_ops.push(Operation::new("Do", vec![xobject_name.into()]));
     start_ops.push(Operation::new("q", vec![]));
-    start_ops.push(Operation::new("cm", vec![
-        1.into(),
-        0.into(),
-        0.into(),
-        1.into(),
-        content_x.into(),
-        content_y.into(),
-    ]));
+    start_ops.push(Operation::new(
+        "cm",
+        vec![
+            1.into(),
+            0.into(),
+            0.into(),
+            1.into(),
+            content_x.into(),
+            content_y.into(),
+        ],
+    ));
 
-    let start_content = Content { operations: start_ops };
+    let start_content = Content {
+        operations: start_ops,
+    };
     let start_stream = Stream::new(dictionary! {}, start_content.encode()?);
     let start_id = doc.add_object(start_stream);
 
     // Create wrapper stream: transformation end
     let end_ops = vec![Operation::new("Q", vec![])];
-    let end_content = Content { operations: end_ops };
+    let end_content = Content {
+        operations: end_ops,
+    };
     let end_stream = Stream::new(dictionary! {}, end_content.encode()?);
     let end_id = doc.add_object(end_stream);
 
