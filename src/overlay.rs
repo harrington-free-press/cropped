@@ -56,6 +56,7 @@ pub fn combine(
 
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
+    let total_pages = page_ids.len();
     for (index, page_id) in page_ids.iter().enumerate() {
         stamp_page(
             &mut manuscript_document,
@@ -66,6 +67,7 @@ pub fn combine(
             char_width,
             &timestamp,
             index + 1,
+            total_pages,
         )?;
     }
 
@@ -247,6 +249,7 @@ fn generate_datetime(timestamp: &str, font_name: &str) -> Vec<Operation> {
 /// The page number is positioned at bottom right, 1cm from both edges.
 fn generate_page_number(
     page_num: usize,
+    total_pages: usize,
     page_width: f64,
     font_name: &str,
     char_width: f64,
@@ -256,7 +259,7 @@ fn generate_page_number(
     // Position 1cm from bottom and right edges (28.35 points)
     let y_pos = 28.35;
 
-    let text = format!("{}", page_num);
+    let text = format!("{}/{}", page_num, total_pages);
 
     // Calculate x position to right-align using actual font metrics
     let font_size = 10.0;
@@ -297,6 +300,7 @@ fn generate_page_number(
 fn create_overlay_xobject(
     doc: &mut Document,
     page_num: usize,
+    total_pages: usize,
     trim_x: f64,
     trim_y: f64,
     trim_width: f64,
@@ -315,7 +319,7 @@ fn create_overlay_xobject(
     ops.extend(generate_datetime(timestamp, font_name));
 
     // Draw page number at bottom right
-    ops.extend(generate_page_number(page_num, 595.0, font_name, char_width));
+    ops.extend(generate_page_number(page_num, total_pages, 595.0, font_name, char_width));
 
     // Create the Form XObject's content
     let content = Content { operations: ops };
@@ -381,6 +385,7 @@ fn stamp_page(
     char_width: f64,
     timestamp: &str,
     page_num: usize,
+    total_pages: usize,
 ) -> lopdf::Result<()> {
     // Clone the page dictionary once so we can mutate doc
     let page = doc.get_object(page_id)?.as_dict()?.clone();
@@ -420,6 +425,7 @@ fn stamp_page(
     let overlay_xobject_id = create_overlay_xobject(
         doc,
         page_num,
+        total_pages,
         trim_x,
         trim_y,
         trim_width,
