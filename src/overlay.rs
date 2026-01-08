@@ -34,7 +34,7 @@ pub fn combine(
 
     info!("Manuscript loaded");
 
-    // Embed font once for all pages
+    // Embed Inconsolata font once for all pages (TrueType with WinAnsiEncoding)
     let (font_id, char_width) = fonts::embed_font(&mut manuscript_document)?;
     info!("Font embedded");
 
@@ -64,7 +64,7 @@ pub fn combine(
             trim_height,
             font_id,
             char_width,
-            timestamp,
+            &timestamp,
             index + 1,
         )?;
     }
@@ -320,7 +320,7 @@ fn create_overlay_xobject(
     // Create the Form XObject's content
     let content = Content { operations: ops };
 
-    // Create Resources dictionary for the Form XObject with just our font
+    // Create Resources dictionary for the Form XObject with Inconsolata font
     let mut font_dict = dictionary! {};
     font_dict.set(font_name.as_bytes(), font_id);
     let font_dict_id = doc.add_object(font_dict);
