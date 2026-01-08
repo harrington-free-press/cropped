@@ -1,9 +1,9 @@
 use std::path::Path;
 
+use chrono::{Local, TimeZone};
+use chrono_tz::Tz;
 use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, ObjectId, Stream, dictionary};
-use time::OffsetDateTime;
-use time::format_description::well_known::{Iso8601, iso8601};
 use tracing::info;
 
 use crate::fonts;
@@ -39,17 +39,20 @@ pub fn combine(
     info!("Font embedded");
 
     // Calculate timestamp once for all pages
-    const FORMAT: Iso8601<
-        {
-            iso8601::Config::DEFAULT
-                .set_time_precision(iso8601::TimePrecision::Second {
-                    decimal_digits: None,
-                })
-                .encode()
-        },
-    > = Iso8601;
-    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-    let timestamp = now.format(&FORMAT).unwrap_or_else(|_| String::from(""));
+    // Format: YYYY-MM-DD HH:MM:SS ZZZZ (where ZZZZ is timezone abbreviation like AEDT)
+    let now = Local::now();
+
+    // Get timezone abbreviation using chrono-tz
+    // Parse the system timezone name and use it to get proper abbreviation
+    let tz_name = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+    let tz: Tz = tz_name.parse().unwrap_or(chrono_tz::UTC);
+    let now_with_tz = tz
+        .from_local_datetime(&now.naive_local())
+        .single()
+        .unwrap_or_else(|| tz.from_utc_datetime(&now.naive_utc()));
+    let tz_abbrev = now_with_tz.format("%Z").to_string();
+
+    let timestamp = format!("{} {}", now.format("%Y-%m-%d %H:%M:%S"), tz_abbrev);
 
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
