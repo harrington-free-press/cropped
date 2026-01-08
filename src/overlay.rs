@@ -4,6 +4,8 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, ObjectId, Stream, dictionary};
 use tracing::info;
 
+use crate::fonts;
+
 /// Add crop marks to a manuscript PDF by expanding pages to A4 and drawing lines.
 ///
 /// Uses a "stamping" approach: the manuscript document is the primary file,
@@ -30,10 +32,14 @@ pub fn combine(
 
     info!("Manuscript loaded");
 
+    // Embed font once for all pages
+    let font_id = fonts::embed_font(&mut manuscript_document)?;
+    info!("Font embedded");
+
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
-    for page_id in page_ids {
-        stamp_page(&mut manuscript_document, page_id, trim_width, trim_height)?;
+    for (index, page_id) in page_ids.iter().enumerate() {
+        stamp_page(&mut manuscript_document, *page_id, trim_width, trim_height, font_id, index + 1)?;
     }
 
     manuscript_document.compress();
@@ -119,7 +125,43 @@ fn generate_crop_marks(
     ops
 }
 
-/// Adds crop marks to a single manuscript page.
+/// Generate PDF operations to draw a page number footer.
+///
+/// * `page_num` - The page number to display
+/// * `page_width` - Width of the page (typically 595 for A4)
+/// * `font_name` - The resource name for the font (e.g., "F1")
+///
+/// The page number is centered horizontally and positioned 1cm (~28.35 pt) from the bottom edge.
+fn generate_page_number(page_num: usize, page_width: f64, font_name: &str) -> Vec<Operation> {
+    let mut ops = Vec::new();
+
+    // Position 1cm from bottom (28.35 points)
+    let y_pos = 28.35;
+    let x_pos = page_width / 2.0;
+
+    let text = format!("{}", page_num);
+
+    // Begin text object
+    ops.push(Operation::new("BT", vec![]));
+
+    // Set font (Inconsolata at 10pt)
+    ops.push(Operation::new("Tf", vec![font_name.into(), 10.into()]));
+
+    // Position text (roughly centered - Inconsolata is monospaced ~6pt per char at 10pt)
+    let approx_width = text.len() as f64 * 6.0;
+    let centered_x = x_pos - (approx_width / 2.0);
+    ops.push(Operation::new("Td", vec![centered_x.into(), y_pos.into()]));
+
+    // Show text
+    ops.push(Operation::new("Tj", vec![Object::String(text.into_bytes(), lopdf::StringFormat::Literal)]));
+
+    // End text object
+    ops.push(Operation::new("ET", vec![]));
+
+    ops
+}
+
+/// Adds crop marks and page number to a single manuscript page.
 ///
 /// Preserves the original page content by wrapping it in transformation
 /// operations avoiding the necessity we would otherwise have to decode and
@@ -131,7 +173,7 @@ fn generate_crop_marks(
 ///
 /// where:
 ///
-/// - start_wrapper: crop marks + transformation start (q, cm)
+/// - start_wrapper: crop marks + page number + transformation start (q, cm)
 /// - original_content: preserved as-is (Reference or Array)
 /// - end_wrapper: transformation end (Q)
 ///
@@ -145,6 +187,8 @@ fn stamp_page(
     page_id: ObjectId,
     trim_width: f64,
     trim_height: f64,
+    font_id: ObjectId,
+    page_num: usize,
 ) -> lopdf::Result<()> {
     // Clone the page dictionary once so we can mutate doc
     let page = doc.get_object(page_id)?.as_dict()?.clone();
@@ -176,6 +220,60 @@ fn stamp_page(
     // Change MediaBox to A4 (595×842)
     new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
 
+    // Add font to page resources using a unique name
+    let font_name = "cropped-F1";
+
+    // Resolve Resources (might be a Reference)
+    let resources_obj = new_page.get(b"Resources").ok();
+    let res_dict = if let Some(obj) = resources_obj {
+        match obj {
+            Object::Dictionary(d) => Some(d.clone()),
+            Object::Reference(id) => {
+                // Dereference the Resources object
+                doc.get_object(*id).ok().and_then(|o| o.as_dict().ok()).cloned()
+            }
+            _ => None,
+        }
+    } else {
+        // No Resources found, create minimal one
+        None
+    };
+
+    if let Some(mut res_dict) = res_dict {
+        // Add or update Font dictionary (handling both direct dict and Reference)
+        let font_obj = res_dict.get(b"Font").ok();
+        let existing_font_dict = if let Some(obj) = font_obj {
+            match obj {
+                Object::Dictionary(d) => Some(d.clone()),
+                Object::Reference(id) => {
+                    // Dereference the Font dictionary
+                    doc.get_object(*id).ok().and_then(|o| o.as_dict().ok()).cloned()
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(mut font_dict) = existing_font_dict {
+            font_dict.set(font_name, font_id);
+            res_dict.set("Font", font_dict);
+        } else {
+            let mut font_dict = dictionary! {};
+            font_dict.set(font_name, font_id);
+            res_dict.set("Font", font_dict);
+        }
+        new_page.set("Resources", Object::Dictionary(res_dict));
+    } else {
+        // No existing resources, create new one with just our font
+        let resources = dictionary! {
+            "Font" => dictionary! {
+                font_name => font_id,
+            },
+        };
+        new_page.set("Resources", Object::Dictionary(resources));
+    }
+
     // Center actual content on A4
     let content_x: f64 = (595.0 - actual_width) / 2.0;
     let content_y: f64 = (842.0 - actual_height) / 2.0;
@@ -184,10 +282,12 @@ fn stamp_page(
     let trim_x: f64 = (595.0 - trim_width) / 2.0;
     let trim_y: f64 = (842.0 - trim_height) / 2.0;
 
-    // Create wrapper stream: crop marks + transformation start
+    // Create wrapper stream: crop marks + page number + transformation start
     let mut start_ops = Vec::new();
     // Draw crop marks at trim size position
     start_ops.extend(generate_crop_marks(trim_x, trim_y, trim_width, trim_height));
+    // Draw page number
+    start_ops.extend(generate_page_number(page_num, 595.0, font_name));
     start_ops.push(Operation::new("q", vec![]));
     start_ops.push(Operation::new("cm", vec![
         1.into(),
