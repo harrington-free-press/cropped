@@ -13,3 +13,4 @@ owo-colors = "4.2.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+ttf-parser = "0.25"
