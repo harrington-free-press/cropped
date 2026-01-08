@@ -7,9 +7,13 @@ authors = [ "Andrew Cowie" ]
 edition = "2024"
 
 [dependencies]
+chrono = "0.4"
+chrono-tz = "0.10"
 clap = { version = "4.5.53", features = ["wrap_help"] }
+iana-time-zone = "0.1"
 lopdf = "0.38.0"
 owo-colors = "4.2.3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+ttf-parser = "0.25"

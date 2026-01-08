@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tracing::{debug, info};
 use tracing_subscriber;
 
+mod fonts;
 mod overlay;
 
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
