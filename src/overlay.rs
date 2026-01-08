@@ -2,6 +2,8 @@ use std::path::Path;
 
 use lopdf::content::{Content, Operation};
 use lopdf::{Document, Object, ObjectId, Stream, dictionary};
+use time::OffsetDateTime;
+use time::format_description::well_known::{Iso8601, iso8601};
 use tracing::info;
 
 use crate::fonts;
@@ -36,6 +38,19 @@ pub fn combine(
     let (font_id, char_width) = fonts::embed_font(&mut manuscript_document)?;
     info!("Font embedded");
 
+    // Calculate timestamp once for all pages
+    const FORMAT: Iso8601<
+        {
+            iso8601::Config::DEFAULT
+                .set_time_precision(iso8601::TimePrecision::Second {
+                    decimal_digits: None,
+                })
+                .encode()
+        },
+    > = Iso8601;
+    let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+    let timestamp = now.format(&FORMAT).unwrap_or_else(|_| String::from(""));
+
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
     for (index, page_id) in page_ids.iter().enumerate() {
@@ -46,6 +61,7 @@ pub fn combine(
             trim_height,
             font_id,
             char_width,
+            timestamp,
             index + 1,
         )?;
     }
@@ -181,6 +197,43 @@ fn generate_crop_marks(
     ops
 }
 
+/// Generate PDF operations to draw a date/time footer.
+///
+/// * `timestamp` - The pre-formatted timestamp string
+/// * `font_name` - The resource name for the font (e.g., "F1")
+///
+/// The date/time is positioned at bottom left, 1cm from both edges.
+fn generate_datetime(timestamp: &str, font_name: &str) -> Vec<Operation> {
+    let mut ops = Vec::new();
+
+    // Position 1cm from bottom and left edges (28.35 points)
+    let y_pos = 28.35;
+    let x_pos = 28.35;
+
+    // Begin text object
+    ops.push(Operation::new("BT", vec![]));
+
+    // Set font (Inconsolata at 10pt)
+    ops.push(Operation::new("Tf", vec![font_name.into(), 10.into()]));
+
+    // Position text at bottom left
+    ops.push(Operation::new("Td", vec![x_pos.into(), y_pos.into()]));
+
+    // Show text
+    ops.push(Operation::new(
+        "Tj",
+        vec![Object::String(
+            timestamp.as_bytes().to_vec(),
+            lopdf::StringFormat::Literal,
+        )],
+    ));
+
+    // End text object
+    ops.push(Operation::new("ET", vec![]));
+
+    ops
+}
+
 /// Generate PDF operations to draw a page number footer.
 ///
 /// * `page_num` - The page number to display
@@ -247,20 +300,19 @@ fn create_overlay_xobject(
     trim_height: f64,
     font_id: ObjectId,
     char_width: f64,
+    timestamp: &str,
 ) -> lopdf::Result<ObjectId> {
     let mut ops = Vec::new();
 
     // Draw crop marks
     ops.extend(generate_crop_marks(trim_x, trim_y, trim_width, trim_height));
 
-    // Draw page number
+    // Draw date/time at bottom left
     let font_name = "F1";
-    ops.extend(generate_page_number(
-        page_num,
-        595.0,
-        font_name,
-        char_width,
-    ));
+    ops.extend(generate_datetime(timestamp, font_name));
+
+    // Draw page number at bottom right
+    ops.extend(generate_page_number(page_num, 595.0, font_name, char_width));
 
     // Create the Form XObject's content
     let content = Content { operations: ops };
@@ -324,6 +376,7 @@ fn stamp_page(
     trim_height: f64,
     font_id: ObjectId,
     char_width: f64,
+    timestamp: &str,
     page_num: usize,
 ) -> lopdf::Result<()> {
     // Clone the page dictionary once so we can mutate doc
@@ -370,6 +423,7 @@ fn stamp_page(
         trim_height,
         font_id,
         char_width,
+        timestamp,
     )?;
 
     // Add the overlay XObject to page Resources
