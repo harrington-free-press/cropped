@@ -54,7 +54,7 @@ pub fn combine(
 
     let timestamp = format!("{} {}", now.format("%Y-%m-%d %H:%M:%S"), tz_abbrev);
 
-    let filename = manuscript_path.file_name().unwrap().to_str();
+    let filename = manuscript_path.file_name().unwrap().to_str().unwrap_or("-");
 
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
