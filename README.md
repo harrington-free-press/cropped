@@ -11,8 +11,15 @@ source, translate it to the middle of the A4 page, and then merge it with a
 template containing the crop marks and footer. This binary, _cropped_ can be
 built with
 
-$ cargo build
-$ cargo run
+    $ cargo build
+    $ cargo run -- --help
 
 as you would expect of a Rust program. You specify the output filename with
 `-o` and then supply the filename of the manuscript you wish to print.
+
+    $ cropped -o Output.pdf Input.pdf
+
+The resultant PDF will have the timestamp, input filename, and page number as
+shown in this example:
+
+![Example Screenshot](images/Screenshot.png)
