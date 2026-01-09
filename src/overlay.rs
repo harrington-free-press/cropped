@@ -54,6 +54,8 @@ pub fn combine(
 
     let timestamp = format!("{} {}", now.format("%Y-%m-%d %H:%M:%S"), tz_abbrev);
 
+    let filename = manuscript_path.file_name().unwrap().to_str();
+
     // Process each manuscript page
     let page_ids: Vec<ObjectId> = manuscript_document.page_iter().collect();
     let total_pages = page_ids.len();
@@ -66,6 +68,7 @@ pub fn combine(
             font_id,
             char_width,
             &timestamp,
+            filename,
             index + 1,
             total_pages,
         )?;
@@ -290,6 +293,54 @@ fn generate_page_number(
     ops
 }
 
+/// Generate PDF operations to draw a filename footer.
+///
+/// * `filename` - The filename to display
+/// * `page_width` - Width of the page (we expect 595 for A4)
+/// * `font_name` - The resource name for the font (we expect "F1")
+/// * `char_width` - Character width at 1pt font size
+///
+/// The filename is positioned at bottom center, 1cm from bottom edge.
+fn generate_filename(
+    filename: &str,
+    page_width: f64,
+    font_name: &str,
+    char_width: f64,
+) -> Vec<Operation> {
+    let mut ops = Vec::new();
+
+    // Position 1cm from bottom edge (28.35 points)
+    let y_pos = 28.35;
+
+    // Calculate x position to center-align using actual font metrics
+    let font_size = 10.0;
+    let text_width = filename.len() as f64 * char_width * font_size;
+    let x_pos = (page_width - text_width) / 2.0;
+
+    // Begin text object
+    ops.push(Operation::new("BT", vec![]));
+
+    // Set font (Inconsolata at 10pt)
+    ops.push(Operation::new("Tf", vec![font_name.into(), 10.into()]));
+
+    // Position text at bottom center
+    ops.push(Operation::new("Td", vec![x_pos.into(), y_pos.into()]));
+
+    // Show text
+    ops.push(Operation::new(
+        "Tj",
+        vec![Object::String(
+            filename.as_bytes().to_vec(),
+            lopdf::StringFormat::Literal,
+        )],
+    ));
+
+    // End text object
+    ops.push(Operation::new("ET", vec![]));
+
+    ops
+}
+
 /// Create a Form XObject containing crop marks and page number.
 ///
 /// This Form XObject has its own self-contained Resources dictionary with the font,
@@ -308,6 +359,7 @@ fn create_overlay_xobject(
     font_id: ObjectId,
     char_width: f64,
     timestamp: &str,
+    filename: &str,
 ) -> lopdf::Result<ObjectId> {
     let mut ops = Vec::new();
 
@@ -318,8 +370,17 @@ fn create_overlay_xobject(
     let font_name = "F1";
     ops.extend(generate_datetime(timestamp, font_name));
 
+    // Draw filename at bottom center
+    ops.extend(generate_filename(filename, 595.0, font_name, char_width));
+
     // Draw page number at bottom right
-    ops.extend(generate_page_number(page_num, total_pages, 595.0, font_name, char_width));
+    ops.extend(generate_page_number(
+        page_num,
+        total_pages,
+        595.0,
+        font_name,
+        char_width,
+    ));
 
     // Create the Form XObject's content
     let content = Content { operations: ops };
@@ -384,6 +445,7 @@ fn stamp_page(
     font_id: ObjectId,
     char_width: f64,
     timestamp: &str,
+    filename: &str,
     page_num: usize,
     total_pages: usize,
 ) -> lopdf::Result<()> {
@@ -433,6 +495,7 @@ fn stamp_page(
         font_id,
         char_width,
         timestamp,
+        filename,
     )?;
 
     // Add the overlay XObject to page Resources
