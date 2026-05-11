@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .version(VERSION)
         .propagate_version(true)
         .author("Andrew Cowie")
-        .about("Place a camera-ready PDF sheet into an A4 page")
+        .about("Place a camera-ready PDF sheet into a larger page with crop marks")
         .disable_help_subcommand(true)
         .disable_help_flag(true)
         .disable_version_flag(true)
@@ -112,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('s')
                 .long("size")
                 .value_name("SIZE")
-                .help("Trim size of the input manuscript. Either \"a5\", \"trade\", or dimensions in milimetres (for example \"140x210\"). Note that this is ths size the crop marks will be set at; the input document may be somewhat larger if it has bleed.")
+                .help("Trim size of the input manuscript. Either \"a5\", \"trade\", or dimensions in millimetres (for example \"140x210\"). Note that this is the size the crop marks will be set at; the input document may be somewhat larger if it has bleed.")
                 .value_parser(value_parser!(TrimSize))
                 .default_value("trade"),
         )
@@ -120,8 +120,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arg::new("paper")
                 .short('p')
                 .long("paper")
-                .value_name("SIZE")
-                .help("Paper size the  manuscript will be placed onto. One of \"a2\", \"a3\", \"a4\", \"letter\", or you can specify the dimensions in milimetres.")
+                .value_name("PAPER")
+                .help("Paper size the manuscript will be placed onto. One of \"a2\", \"a3\", \"a4\", \"letter\", or you can specify the dimensions in millimetres.")
                 .value_parser(value_parser!(PaperSize))
                 .default_value("a4"),
         )
