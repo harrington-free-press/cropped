@@ -12,6 +12,22 @@ const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 const MM_TO_PT: f64 = 72.0 / 25.4;
 
+/// Parse "WxH" or "W×H" with values in millimetres, returning points.
+fn parse_mm_dimensions(s: &str) -> Result<(f64, f64), String> {
+    let (w, h) = s
+        .split_once(|c: char| c == 'x' || c == '×')
+        .ok_or_else(|| format!("invalid size argument: '{}'", s))?;
+    let w: f64 = w
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid width '{}': {}", w, e))?;
+    let h: f64 = h
+        .trim()
+        .parse()
+        .map_err(|e| format!("invalid height '{}': {}", h, e))?;
+    Ok((w * MM_TO_PT, h * MM_TO_PT))
+}
+
 #[derive(Clone, Debug)]
 struct TrimSize {
     width: f64,
@@ -25,22 +41,30 @@ impl FromStr for TrimSize {
         let (width, height) = match s {
             "trade" => (432.0, 648.0), // 6" × 9"
             "a5" => (420.0, 595.0),
-            _ => {
-                let (w, h) = s
-                    .split_once(|c: char| c == 'x' || c == '×')
-                    .ok_or_else(|| format!("invalid size argument: '{}'", s))?;
-                let w: f64 = w
-                    .trim()
-                    .parse()
-                    .map_err(|e| format!("invalid width '{}': {}", w, e))?;
-                let h: f64 = h
-                    .trim()
-                    .parse()
-                    .map_err(|e| format!("invalid height '{}': {}", h, e))?;
-                (w * MM_TO_PT, h * MM_TO_PT)
-            }
+            _ => parse_mm_dimensions(s)?,
         };
         Ok(TrimSize { width, height })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PaperSize {
+    width: f64,
+    height: f64,
+}
+
+impl FromStr for PaperSize {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (width, height) = match s {
+            "a4" => (595.0, 842.0),       // 210 × 297 mm
+            "a3" => (842.0, 1191.0),      // 297 × 420 mm
+            "a2" => (1191.0, 1684.0),     // 420 × 594 mm
+            "letter" => (612.0, 792.0),   // 8.5 × 11 in
+            _ => parse_mm_dimensions(s)?,
+        };
+        Ok(PaperSize { width, height })
     }
 }
 
@@ -88,9 +112,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .short('s')
                 .long("size")
                 .value_name("SIZE")
-                .help("Trim size of the input manuscript (Either \"trade\", \"a5\", or dimensions in milimetres for example \"140×210\").")
+                .help("Trim size of the input manuscript. Either \"a5\", \"trade\", or dimensions in milimetres (for example \"140x210\"). Note that this is ths size the crop marks will be set at; the input document may be somewhat larger if it has bleed.")
                 .value_parser(value_parser!(TrimSize))
                 .default_value("trade"),
+        )
+        .arg(
+            Arg::new("paper")
+                .short('p')
+                .long("paper")
+                .value_name("SIZE")
+                .help("Paper size the  manuscript will be placed onto. One of \"a2\", \"a3\", \"a4\", \"letter\", or you can specify the dimensions in milimetres.")
+                .value_parser(value_parser!(PaperSize))
+                .default_value("a4"),
         )
         .arg(
             Arg::new("manuscript")
@@ -112,19 +145,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let trim_size = matches.get_one::<TrimSize>("size").unwrap();
 
+    let paper_size = matches.get_one::<PaperSize>("paper").unwrap();
+
     if !manuscript_path.exists() {
         eprintln!("{}: Input manuscript PDF not found.", "error".bright_red());
         std::process::exit(1);
     }
 
-    let (trim_width, trim_height) = (trim_size.width, trim_size.height);
-
     debug!(?output_path);
     debug!(?manuscript_path);
     debug!(?trim_size);
+    debug!(?paper_size);
 
     // Combine the PDFs
-    overlay::combine(output_path, manuscript_path, trim_width, trim_height)?;
+    overlay::combine(
+        output_path,
+        manuscript_path,
+        trim_size.width,
+        trim_size.height,
+        paper_size.width,
+        paper_size.height,
+    )?;
 
     info!("PDF combination completed successfully");
 
