@@ -29,6 +29,8 @@ pub fn combine(
     manuscript_path: &Path,
     trim_width: f64,
     trim_height: f64,
+    paper_width: f64,
+    paper_height: f64,
 ) -> lopdf::Result<()> {
     let mut manuscript_document = Document::load(manuscript_path)?;
 
@@ -65,6 +67,8 @@ pub fn combine(
             *page_id,
             trim_width,
             trim_height,
+            paper_width,
+            paper_height,
             font_id,
             char_width,
             &timestamp,
@@ -356,6 +360,8 @@ fn create_overlay_xobject(
     trim_y: f64,
     trim_width: f64,
     trim_height: f64,
+    paper_width: f64,
+    paper_height: f64,
     font_id: ObjectId,
     char_width: f64,
     timestamp: &str,
@@ -371,13 +377,13 @@ fn create_overlay_xobject(
     ops.extend(generate_datetime(timestamp, font_name));
 
     // Draw filename at bottom center
-    ops.extend(generate_filename(filename, 595.0, font_name, char_width));
+    ops.extend(generate_filename(filename, paper_width, font_name, char_width));
 
     // Draw page number at bottom right
     ops.extend(generate_page_number(
         page_num,
         total_pages,
-        595.0,
+        paper_width,
         font_name,
         char_width,
     ));
@@ -395,12 +401,12 @@ fn create_overlay_xobject(
     };
 
     // Create the Form XObject
-    // BBox covers the entire A4 page so crop marks and page number can be anywhere
+    // BBox covers the entire page so crop marks and page number can be anywhere
     let xobject_stream = Stream::new(
         dictionary! {
             "Type" => "XObject",
             "Subtype" => "Form",
-            "BBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            "BBox" => vec![0.into(), 0.into(), paper_width.into(), paper_height.into()],
             "Resources" => Object::Dictionary(resources),
         },
         content.encode()?,
@@ -442,6 +448,8 @@ fn stamp_page(
     page_id: ObjectId,
     trim_width: f64,
     trim_height: f64,
+    paper_width: f64,
+    paper_height: f64,
     font_id: ObjectId,
     char_width: f64,
     timestamp: &str,
@@ -476,12 +484,20 @@ fn stamp_page(
 
     let mut new_page = page;
 
-    // Change MediaBox to A4 (595×842)
-    new_page.set("MediaBox", vec![0.into(), 0.into(), 595.into(), 842.into()]);
+    // Change MediaBox to the destination paper size
+    new_page.set(
+        "MediaBox",
+        vec![
+            0.into(),
+            0.into(),
+            paper_width.into(),
+            paper_height.into(),
+        ],
+    );
 
-    // Calculate trim area position (centered on A4)
-    let trim_x: f64 = (595.0 - trim_width) / 2.0;
-    let trim_y: f64 = (842.0 - trim_height) / 2.0;
+    // Calculate trim area position (centered on the paper)
+    let trim_x: f64 = (paper_width - trim_width) / 2.0;
+    let trim_y: f64 = (paper_height - trim_height) / 2.0;
 
     // Create Form XObject containing crop marks and page number with its own Resources
     let overlay_xobject_id = create_overlay_xobject(
@@ -492,6 +508,8 @@ fn stamp_page(
         trim_y,
         trim_width,
         trim_height,
+        paper_width,
+        paper_height,
         font_id,
         char_width,
         timestamp,
@@ -543,9 +561,9 @@ fn stamp_page(
     new_resources.set("XObject", xobject_dict_id);
     new_page.set("Resources", Object::Dictionary(new_resources));
 
-    // Center actual content on A4
-    let content_x: f64 = (595.0 - actual_width) / 2.0;
-    let content_y: f64 = (842.0 - actual_height) / 2.0;
+    // Center actual content on the paper
+    let content_x: f64 = (paper_width - actual_width) / 2.0;
+    let content_y: f64 = (paper_height - actual_height) / 2.0;
 
     // Create wrapper stream: invoke overlay XObject + transformation start
     let mut start_ops = Vec::new();
